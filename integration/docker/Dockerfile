@@ -33,6 +33,7 @@ FROM alpine:3.10.2 AS alluxio-extractor
 ARG ALLUXIO_TARBALL=http://downloads.alluxio.io/downloads/files/2.9.5/alluxio-2.9.5-bin.tar.gz
 # (Alert):It's not recommended to set this Argument to true, unless you know exactly what you are doing
 ARG ENABLE_DYNAMIC_USER=false
+ARG TARGETARGH
 
 ADD ${ALLUXIO_TARBALL} /opt/
 # Remote tarball needs to be untarred. Local tarball is untarred automatically.
@@ -41,12 +42,22 @@ RUN cd /opt && \
     (if ls | grep -q ".tar.gz"; then tar -xzf *.tar.gz && rm *.tar.gz; fi) && \
     ln -s alluxio-* alluxio
 
+# Netty EPOLL libraries
+RUN arch=$([[ "$TARGETARCH" == "amd64" ]] && echo x86_64 || echo aarch64) \
+  && curl -sL -o netty-transport-native-epoll.jar \
+    "https://repo1.maven.org/maven2/io/netty/netty-transport-native-epoll/4.1.87.Final/netty-transport-native-epoll-4.1.87.Final-linux-${arch}.jar" \
+  && mv netty-transport-native-epoll.jar /opt/alluxio/lib/
+
+COPY build/alluxio-client-2.9.5.jar /opt/alluxio/assembly/alluxio-client-2.9.5.jar
+COPY build/alluxio-server-2.9.5.jar /opt/alluxio/assembly/alluxio-server-2.9.5.jar
+COPY build/alluxio-underfs-s3a-2.9.5.jar /opt/alluxio/lib/alluxio-underfs-s3a-2.9.5.jar
+
 RUN if [ ${ENABLE_DYNAMIC_USER} = "true" ] ; then \
        chmod -R 777 /opt/* ; \
     fi
 
 # Configure Java
-FROM centos:7 as build_java8
+FROM quay.io/centos/centos:stream9 as build_java8
 RUN \
     yum update -y && yum upgrade -y && \
     yum install -y java-1.8.0-openjdk-devel java-1.8.0-openjdk && \
@@ -55,7 +66,7 @@ ENV JAVA_HOME /usr/lib/jvm/java-1.8.0-openjdk
 # Disable JVM DNS cache in java8 (https://github.com/Alluxio/alluxio/pull/9452)
 RUN echo "networkaddress.cache.ttl=0" >> /usr/lib/jvm/java-1.8.0-openjdk/jre/lib/security/java.security
 
-FROM centos:7 as build_java11
+FROM quay.io/centos/centos:stream9 as build_java11
 RUN \
     yum update -y && yum upgrade -y && \
     yum install -y java-11-openjdk-devel java-11-openjdk && \
@@ -82,7 +93,7 @@ RUN \
     cd .. && \
     rm -rf libfuse && \
     yum remove -y gcc gcc-c++ make cmake gettext-devel libtool autoconf wget git && \
-    yum install -y fuse3 fuse3-devel fuse3-lib && \
+    yum install -y fuse3 fuse3-devel fuse3-libs && \
     yum clean all
 
 # Configuration for the modified libfuse2
@@ -104,7 +115,8 @@ ARG ENABLE_DYNAMIC_USER=true
 # Add Tini for Alluxio helm charts (https://github.com/Alluxio/alluxio/pull/12233)
 # - https://github.com/krallin/tini
 ENV TINI_VERSION v0.18.0
-ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static /usr/local/bin/tini
+ARG TARGETARCH
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static-${TARGETARCH} /usr/local/bin/tini
 RUN chmod +x /usr/local/bin/tini
 
 # If Alluxio user, group, gid, and uid aren't root|0, create the alluxio user and set file permissions accordingly
