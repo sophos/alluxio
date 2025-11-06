@@ -33,7 +33,6 @@ FROM alpine:3.10.2 AS alluxio-extractor
 ARG ALLUXIO_TARBALL=http://downloads.alluxio.io/downloads/files/2.9.5/alluxio-2.9.5-bin.tar.gz
 # (Alert):It's not recommended to set this Argument to true, unless you know exactly what you are doing
 ARG ENABLE_DYNAMIC_USER=false
-ARG TARGETARGH
 
 ADD ${ALLUXIO_TARBALL} /opt/
 # Remote tarball needs to be untarred. Local tarball is untarred automatically.
@@ -42,15 +41,10 @@ RUN cd /opt && \
     (if ls | grep -q ".tar.gz"; then tar -xzf *.tar.gz && rm *.tar.gz; fi) && \
     ln -s alluxio-* alluxio
 
-# Netty EPOLL libraries
-RUN arch=$([[ "$TARGETARCH" == "amd64" ]] && echo x86_64 || echo aarch64) \
-  && curl -sL -o netty-transport-native-epoll.jar \
-    "https://repo1.maven.org/maven2/io/netty/netty-transport-native-epoll/4.1.87.Final/netty-transport-native-epoll-4.1.87.Final-linux-${arch}.jar" \
-  && mv netty-transport-native-epoll.jar /opt/alluxio/lib/
-
-COPY build/alluxio-client-2.9.5.jar /opt/alluxio/assembly/alluxio-client-2.9.5.jar
-COPY build/alluxio-server-2.9.5.jar /opt/alluxio/assembly/alluxio-server-2.9.5.jar
-COPY build/alluxio-underfs-s3a-2.9.5.jar /opt/alluxio/lib/alluxio-underfs-s3a-2.9.5.jar
+COPY build/alluxio-client-2.9.5.jar /opt/alluxio/assembly/
+COPY build/alluxio-server-2.9.5.jar /opt/alluxio/assembly/
+COPY build/alluxio-underfs-s3a-2.9.5.jar /opt/alluxio/lib/
+COPY build/client /opt/alluxio/
 
 RUN if [ ${ENABLE_DYNAMIC_USER} = "true" ] ; then \
        chmod -R 777 /opt/* ; \
@@ -95,6 +89,7 @@ RUN \
     yum remove -y gcc gcc-c++ make cmake gettext-devel libtool autoconf wget git && \
     yum install -y fuse3 fuse3-devel fuse3-libs && \
     yum clean all
+
 
 # Configuration for the modified libfuse2
 ENV MAX_IDLE_THREADS "64"
