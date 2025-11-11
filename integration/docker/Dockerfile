@@ -51,7 +51,7 @@ RUN if [ ${ENABLE_DYNAMIC_USER} = "true" ] ; then \
     fi
 
 # Configure Java
-FROM quay.io/centos/centos:stream9 as build_java8
+FROM quay.io/centos/centos:stream9 AS build_java8
 RUN \
     yum update -y && yum upgrade -y && \
     yum install -y java-1.8.0-openjdk-devel java-1.8.0-openjdk && \
@@ -60,7 +60,7 @@ ENV JAVA_HOME /usr/lib/jvm/java-1.8.0-openjdk
 # Disable JVM DNS cache in java8 (https://github.com/Alluxio/alluxio/pull/9452)
 RUN echo "networkaddress.cache.ttl=0" >> /usr/lib/jvm/java-1.8.0-openjdk/jre/lib/security/java.security
 
-FROM quay.io/centos/centos:stream9 as build_java11
+FROM quay.io/centos/centos:stream9 AS build_java11
 RUN \
     yum update -y && yum upgrade -y && \
     yum install -y java-11-openjdk-devel java-11-openjdk && \

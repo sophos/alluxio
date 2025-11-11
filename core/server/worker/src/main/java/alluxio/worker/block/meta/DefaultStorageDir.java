@@ -96,7 +96,23 @@ public final class DefaultStorageDir implements StorageDir {
    * @return the new created {@link StorageDir}
    */
   public static StorageDir newStorageDir(StorageTier tier, int dirIndex, long capacityBytes,
-      long reservedBytes, String dirPath, String dirMedium) {
+        long reservedBytes, String dirPath, String dirMedium) {
+    // Adjust capacity if overprovisioned
+    File parentDir = new File(dirPath).getParentFile();
+    if (!parentDir.exists()) {
+      parentDir.mkdirs();
+    }
+
+    long totalSpace = parentDir.getTotalSpace();
+    if (totalSpace > 0 && capacityBytes > totalSpace) {
+      LOG.warn("Configured capacity {} for storage dir {} exceeds filesystem total {}. Adjusting down.",
+              capacityBytes, dirPath, totalSpace);
+      capacityBytes = totalSpace;
+    } else {
+      LOG.info("Configured capacity {} for storage dir {} meets filesystem total {}.",
+                capacityBytes, dirPath, totalSpace);
+    }
+
     DefaultStorageDir dir =
         new DefaultStorageDir(tier, dirIndex, capacityBytes, reservedBytes, dirPath, dirMedium);
     dir.initializeMeta();
