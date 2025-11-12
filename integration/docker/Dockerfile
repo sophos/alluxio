@@ -12,9 +12,10 @@
 # ARG defined before the first FROM can be used in FROM lines
 # Only 8 and 11 are supported.
 ARG JAVA_VERSION=8
+ARG PROXY=""
 
 # Setup CSI
-FROM golang:1.18-alpine3.17 AS csi-dev
+FROM ${PROXY}golang:1.18-alpine3.17 AS csi-dev
 ENV GO111MODULE=on
 RUN mkdir -p /alluxio-csi
 COPY ./csi /alluxio-csi
@@ -28,7 +29,7 @@ RUN cd /alluxio-csi && \
 #       - https://github.com/moby/moby/issues/6119
 # ADD with chown doesn't chown the files inside tarball
 #   See - https://github.com/moby/moby/issues/35525
-FROM alpine:3.10.2 AS alluxio-extractor
+FROM ${PROXY}alpine:3.10.2 AS alluxio-extractor
 # Note that downloads for *-SNAPSHOT tarballs are not available.
 ARG ALLUXIO_TARBALL=http://downloads.alluxio.io/downloads/files/2.9.5/alluxio-2.9.5-bin.tar.gz
 # (Alert):It's not recommended to set this Argument to true, unless you know exactly what you are doing
