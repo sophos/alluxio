@@ -75,7 +75,7 @@ RUN \
     yum install -y gcc gcc-c++ make cmake gettext-devel libtool autoconf && \
     git clone https://github.com/Alluxio/libfuse.git && \
     cd libfuse && \
-    git checkout fuse_2.9.6_customize_multi_threads && \
+    git checkout fuse_2_9_5_customize_multi_threads && \
     bash makeconf.sh && \
     ./configure && \
     make -j8 && \
