@@ -295,7 +295,11 @@ func generateTarball(opts *GenerateTarballOpts) error {
 	run(fmt.Sprintf("copying source from %v to %v", repoPath, srcPath), "cp", "-R", repoPath+"/.", srcPath)
 
 	chdir(srcPath)
-	run("running git clean -fdx", "git", "clean", "-fdx")
+	if _, err := os.Stat(filepath.Join(srcPath, ".git")); err == nil {
+		run("running git clean -fdx", "git", "clean", "-fdx")
+	} else {
+		fmt.Println("  skipping git clean (not a git repository)")
+	}
 
 	version, err := getVersion()
 	if err != nil {

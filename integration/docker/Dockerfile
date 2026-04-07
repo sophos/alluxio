@@ -42,11 +42,6 @@ RUN cd /opt && \
     (if ls | grep -q ".tar.gz"; then tar -xzf *.tar.gz && rm *.tar.gz; fi) && \
     ln -s alluxio-* alluxio
 
-COPY build/alluxio-client-2.9.5.jar /opt/alluxio/assembly/
-COPY build/alluxio-server-2.9.5.jar /opt/alluxio/assembly/
-COPY build/alluxio-underfs-s3a-2.9.5.jar /opt/alluxio/lib/
-COPY build/client /opt/alluxio/
-
 RUN if [ ${ENABLE_DYNAMIC_USER} = "true" ] ; then \
        chmod -R 777 /opt/* ; \
     fi
