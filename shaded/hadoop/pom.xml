@@ -66,6 +66,12 @@
           <groupId>org.apache.hadoop</groupId>
           <artifactId>hadoop-core</artifactId>
           <version>${ufs.hadoop.version}</version>
+          <exclusions>
+            <exclusion>
+              <groupId>jdk.tools</groupId>
+              <artifactId>jdk.tools</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
       </dependencies>
     </profile>
@@ -79,11 +85,23 @@
           <groupId>org.apache.hadoop</groupId>
           <artifactId>hadoop-common</artifactId>
           <version>${ufs.hadoop.version}</version>
+          <exclusions>
+            <exclusion>
+              <groupId>jdk.tools</groupId>
+              <artifactId>jdk.tools</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
         <dependency>
           <groupId>org.apache.hadoop</groupId>
           <artifactId>hadoop-hdfs</artifactId>
           <version>${ufs.hadoop.version}</version>
+          <exclusions>
+            <exclusion>
+              <groupId>jdk.tools</groupId>
+              <artifactId>jdk.tools</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
         <dependency>	
           <!-- using older version to match dependency version from Hadoop, guava introduced a breaking change between version 14 and later -->	
@@ -105,11 +123,23 @@
           <groupId>org.apache.hadoop</groupId>
           <artifactId>hadoop-common</artifactId>
           <version>${ufs.hadoop.version}</version>
+          <exclusions>
+            <exclusion>
+              <groupId>jdk.tools</groupId>
+              <artifactId>jdk.tools</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
         <dependency>
           <groupId>org.apache.hadoop</groupId>
           <artifactId>hadoop-hdfs-client</artifactId>
           <version>${ufs.hadoop.version}</version>
+          <exclusions>
+            <exclusion>
+              <groupId>jdk.tools</groupId>
+              <artifactId>jdk.tools</artifactId>
+            </exclusion>
+          </exclusions>
         </dependency>
       </dependencies>
     </profile>
