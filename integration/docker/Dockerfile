@@ -12,9 +12,10 @@
 # ARG defined before the first FROM can be used in FROM lines
 # Only 8 and 11 are supported.
 ARG JAVA_VERSION=8
+ARG PROXY=""
 
 # Setup CSI
-FROM golang:1.18-alpine3.17 AS csi-dev
+FROM ${PROXY}golang:1.18-alpine3.17 AS csi-dev
 ENV GO111MODULE=on
 RUN mkdir -p /alluxio-csi
 COPY ./csi /alluxio-csi
@@ -28,7 +29,7 @@ RUN cd /alluxio-csi && \
 #       - https://github.com/moby/moby/issues/6119
 # ADD with chown doesn't chown the files inside tarball
 #   See - https://github.com/moby/moby/issues/35525
-FROM alpine:3.10.2 AS alluxio-extractor
+FROM ${PROXY}alpine:3.10.2 AS alluxio-extractor
 # Note that downloads for *-SNAPSHOT tarballs are not available.
 ARG ALLUXIO_TARBALL=http://downloads.alluxio.io/downloads/files/2.9.6/alluxio-2.9.6-bin.tar.gz
 # (Alert):It's not recommended to set this Argument to true, unless you know exactly what you are doing
@@ -41,12 +42,17 @@ RUN cd /opt && \
     (if ls | grep -q ".tar.gz"; then tar -xzf *.tar.gz && rm *.tar.gz; fi) && \
     ln -s alluxio-* alluxio
 
+COPY build/alluxio-client-2.9.5.jar /opt/alluxio/assembly/
+COPY build/alluxio-server-2.9.5.jar /opt/alluxio/assembly/
+COPY build/alluxio-underfs-s3a-2.9.5.jar /opt/alluxio/lib/
+COPY build/client /opt/alluxio/
+
 RUN if [ ${ENABLE_DYNAMIC_USER} = "true" ] ; then \
        chmod -R 777 /opt/* ; \
     fi
 
 # Configure Java
-FROM centos:7 as build_java8
+FROM quay.io/centos/centos:stream9 AS build_java8
 RUN \
     yum update -y && yum upgrade -y && \
     yum install -y java-1.8.0-openjdk-devel java-1.8.0-openjdk && \
@@ -55,7 +61,7 @@ ENV JAVA_HOME /usr/lib/jvm/java-1.8.0-openjdk
 # Disable JVM DNS cache in java8 (https://github.com/Alluxio/alluxio/pull/9452)
 RUN echo "networkaddress.cache.ttl=0" >> /usr/lib/jvm/java-1.8.0-openjdk/jre/lib/security/java.security
 
-FROM centos:7 as build_java11
+FROM quay.io/centos/centos:stream9 AS build_java11
 RUN \
     yum update -y && yum upgrade -y && \
     yum install -y java-11-openjdk-devel java-11-openjdk && \
@@ -82,8 +88,9 @@ RUN \
     cd .. && \
     rm -rf libfuse && \
     yum remove -y gcc gcc-c++ make cmake gettext-devel libtool autoconf wget git && \
-    yum install -y fuse3 fuse3-devel fuse3-lib && \
+    yum install -y fuse3 fuse3-devel fuse3-libs && \
     yum clean all
+
 
 # Configuration for the modified libfuse2
 ENV MAX_IDLE_THREADS "64"
@@ -104,7 +111,8 @@ ARG ENABLE_DYNAMIC_USER=true
 # Add Tini for Alluxio helm charts (https://github.com/Alluxio/alluxio/pull/12233)
 # - https://github.com/krallin/tini
 ENV TINI_VERSION v0.18.0
-ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static /usr/local/bin/tini
+ARG TARGETARCH
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static-${TARGETARCH} /usr/local/bin/tini
 RUN chmod +x /usr/local/bin/tini
 
 # If Alluxio user, group, gid, and uid aren't root|0, create the alluxio user and set file permissions accordingly

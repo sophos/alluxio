@@ -796,7 +796,7 @@ public class RaftJournalSystem extends AbstractJournalSystem {
       LOG.info("Started Raft Journal System in {}ms", System.currentTimeMillis() - startTime);
     } catch (IOException e) {
       String errorMessage = MessageFormat.format("Failed to bootstrap raft cluster "
-          + "with addresses {}", mClusterAddresses);
+          + "with addresses {0}", mClusterAddresses);
       throw new AlluxioRuntimeException(Status.UNAVAILABLE, errorMessage, e, ErrorType.Internal,
           true);
     }
