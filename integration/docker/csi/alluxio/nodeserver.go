@@ -12,8 +12,8 @@
 package alluxio
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -23,7 +23,6 @@ import (
 	"github.com/golang/glog"
 	csicommon "github.com/kubernetes-csi/drivers/pkg/csi-common"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
@@ -213,7 +212,7 @@ func getAndCompleteFusePodObj(nodeId string, req *csi.NodeStageVolumeRequest) (*
 
 	// Set pre-stop command (umount) in pod lifecycle
 	lifecycle := &v1.Lifecycle {
-		PreStop: &v1.Handler {
+		PreStop: &v1.LifecycleHandler {
 			Exec: &v1.ExecAction {
 				Command: []string{"/opt/alluxio/integration/fuse/bin/alluxio-fuse", "unmount", req.GetStagingTargetPath()},
 			},
@@ -243,7 +242,7 @@ func getAndCompleteFusePodObj(nodeId string, req *csi.NodeStageVolumeRequest) (*
 }
 
 func (ns *nodeServer) createFusePodIfNotExist(fusePod *v1.Pod) error {
-	if _, err := ns.client.CoreV1().Pods(os.Getenv("NAMESPACE")).Create(fusePod); err != nil {
+	if _, err := ns.client.CoreV1().Pods(os.Getenv("NAMESPACE")).Create(context.TODO(), fusePod, metav1.CreateOptions{}); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			glog.V(4).Infof("Fuse pod %s already exists. Skip creating pod.", fusePod.Name)
 		} else {
@@ -268,7 +267,7 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		return nil, errors.Wrap(err, "Error getting Fuse pod object from template.")
 	}
 	podName := strings.Join([]string{csiFusePodObj.Name, ns.nodeId, req.GetVolumeId()}, "-")
-	if err := ns.client.CoreV1().Pods(os.Getenv("NAMESPACE")).Delete(podName, &metav1.DeleteOptions{}); err != nil {
+	if err := ns.client.CoreV1().Pods(os.Getenv("NAMESPACE")).Delete(context.TODO(), podName, metav1.DeleteOptions{}); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			// Pod not found. Try to clean up the mount point.
 			command := exec.Command("umount", req.GetStagingTargetPath())
@@ -332,7 +331,7 @@ func ensureMountPoint(targetPath string) (bool, error) {
 }
 
 func getFusePodObj() (*v1.Pod, error) {
-	csiFuseYaml, err := ioutil.ReadFile("/opt/alluxio/integration/kubernetes/csi/alluxio-csi-fuse.yaml")
+	csiFuseYaml, err := os.ReadFile("/opt/alluxio/integration/kubernetes/csi/alluxio-csi-fuse.yaml")
 	if err != nil {
 		return nil, errors.Wrap(err, "Error getting CSI Fuse yaml file.")
 	}

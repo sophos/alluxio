@@ -15,7 +15,7 @@ ARG JAVA_VERSION=8
 ARG PROXY=""
 
 # Setup CSI
-FROM ${PROXY}golang:1.22-alpine3.20 AS csi-dev
+FROM ${PROXY}golang:1.25-alpine AS csi-dev
 ENV GO111MODULE=on
 RUN mkdir -p /alluxio-csi
 COPY ./csi /alluxio-csi
