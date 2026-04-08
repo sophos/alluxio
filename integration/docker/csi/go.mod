@@ -1,6 +1,6 @@
 module github.com/Alluxio/integration/csi
 
-go 1.18
+go 1.22
 
 require (
 	github.com/container-storage-interface/spec v1.1.0
