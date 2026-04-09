@@ -127,7 +127,7 @@
               <executable>sh</executable>
               <arguments>
                 <argument>-c</argument>
-                <argument>rm -f ${project.parent.basedir}/lib/alluxio-underfs-hadoop-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-*ozone*.jar ${project.parent.basedir}/lib/alluxio-underfs-cephfs-hadoop-*.jar</argument>
+                <argument>rm -f ${project.parent.basedir}/lib/alluxio-underfs-hadoop-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-*ozone*.jar ${project.parent.basedir}/lib/alluxio-underfs-cephfs-hadoop-*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-cosn-*.jar ${project.parent.basedir}/lib/alluxio-underfs-wasb-*.jar ${project.parent.basedir}/lib/alluxio-integration-tools-hms-*.jar</argument>
               </arguments>
             </configuration>
           </execution>

@@ -72,7 +72,7 @@ var ufsModules = map[string]module{
 	"ufs-hadoop-3.3":  {"hadoop-3.3", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-3 -Dufs.hadoop.version=3.3.4 -PhdfsActiveSync"},
 
 	"ufs-hadoop-ozone-1.2.1":      {"hadoop-ozone-1.2.1", "ozone", false, "-pl underfs/ozone -Pufs-hadoop-3 -Dufs.ozone.version=1.2.1"},
-	"ufs-hadoop-cosn-3.1.0-5.8.5": {"hadoop-cosn-3.1.0-5.8.5", "cosn", true, "-pl underfs/cosn -Dufs.cosn.version=3.1.0-5.8.5"},
+	"ufs-hadoop-cosn-3.1.0-5.8.5": {"hadoop-cosn-3.1.0-5.8.5", "cosn", false, "-pl underfs/cosn -Dufs.cosn.version=3.1.0-5.8.5"},
 }
 
 var fuseUfsModuleNames = []string{
@@ -100,7 +100,6 @@ var libJars = map[string]struct{}{
 }
 
 var defaultLibJars = map[string]struct{}{
-	"integration-tools-hms":        {},
 	"integration-tools-validation": {},
 
 	"underfs-abfs":   {},
@@ -113,7 +112,6 @@ var defaultLibJars = map[string]struct{}{
 	"underfs-oss":    {},
 	"underfs-s3a":    {},
 	"underfs-swift":  {},
-	"underfs-wasb":   {},
 	"underfs-web":    {},
 }
 
