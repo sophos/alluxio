@@ -142,7 +142,7 @@ func getVersion() (string, error) {
 }
 
 func addModules(srcPath, dstPath, name, moduleFlag, version string, modules map[string]module) {
-	for _, moduleName := range strings.Split(moduleFlag, ",") {
+	for _, moduleName := range splitCSVFlag(moduleFlag) {
 		moduleEntry, ok := modules[moduleName]
 		if !ok {
 			// This should be impossible, we validate modulesFlag at the start.
@@ -156,7 +156,7 @@ func addModules(srcPath, dstPath, name, moduleFlag, version string, modules map[
 
 func buildModules(srcPath, name, moduleFlag, version string, modules map[string]module, mvnArgs []string) {
 	// Compile modules for the main build
-	for _, moduleName := range strings.Split(moduleFlag, ",") {
+	for _, moduleName := range splitCSVFlag(moduleFlag) {
 		moduleEntry := modules[moduleName]
 		moduleMvnArgs := mvnArgs
 		for _, arg := range strings.Split(moduleEntry.mavenArgs, " ") {
@@ -234,7 +234,7 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 		)
 	}
 
-	for _, jar := range strings.Split(includedLibJarsFlag, ",") {
+	for _, jar := range splitCSVFlag(includedLibJarsFlag) {
 		pathsToCopy = append(pathsToCopy, fmt.Sprintf("lib/alluxio-%v-%v.jar", jar, version))
 	}
 
