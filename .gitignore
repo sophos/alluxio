@@ -13,6 +13,7 @@
 .classpath
 .fbExcludeFilterFile
 .idea/
+.vscode/
 .metadata/
 .port_coordination/
 .project
