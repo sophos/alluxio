@@ -59,7 +59,7 @@ RUN echo "networkaddress.cache.ttl=0" >> /usr/lib/jvm/java-1.8.0-openjdk/jre/lib
 FROM quay.io/centos/centos:stream9 AS build_java11
 RUN \
     yum update -y && yum upgrade -y && \
-    yum install -y java-11-openjdk-devel java-11-openjdk && \
+    yum install -y java-11-openjdk-headless && \
     yum clean all
 ENV JAVA_HOME /usr/lib/jvm/java-11-openjdk
 # Disable JVM DNS cache in java11 (https://github.com/Alluxio/alluxio/pull/9452)

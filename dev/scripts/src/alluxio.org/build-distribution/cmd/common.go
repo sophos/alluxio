@@ -102,14 +102,10 @@ var libJars = map[string]struct{}{
 var defaultLibJars = map[string]struct{}{
 	"integration-tools-validation": {},
 
-	"underfs-abfs":   {},
-	"underfs-adl":    {},
 	"underfs-cos":    {},
 	"underfs-cephfs": {},
 	"underfs-gcs":    {},
 	"underfs-local":  {},
-	"underfs-obs":    {},
-	"underfs-oss":    {},
 	"underfs-s3a":    {},
 	"underfs-swift":  {},
 	"underfs-web":    {},
