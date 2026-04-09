@@ -118,6 +118,20 @@
             </configuration>
           </execution>
           <execution>
+            <id>trim-legacy-release-ufs-jars</id>
+            <phase>install</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>sh</executable>
+              <arguments>
+                <argument>-c</argument>
+                <argument>rm -f ${project.parent.basedir}/lib/alluxio-underfs-hadoop-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-*ozone*.jar</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
             <id>Test all packages</id>
             <phase>test</phase>
             <goals>

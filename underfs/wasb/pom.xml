@@ -35,6 +35,11 @@
       <artifactId>hadoop-azure</artifactId>
       <version>${ufs.hadoop.version}</version>
     </dependency>
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro</artifactId>
+      <version>1.11.4</version>
+    </dependency>
 
     <!-- Internal dependencies -->
     <dependency>
