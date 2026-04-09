@@ -36,7 +36,7 @@ func Single(args []string) error {
 	addCommonFlags(singleCmd, &FlagsOpts{
 		TargetName: fmt.Sprintf("alluxio-%v-bin.tar.gz", versionMarker),
 		UfsModules: strings.Join(defaultModules(ufsModules), ","),
-		LibJars:    libJarsAll,
+		LibJars:    strings.Join(defaultLibJarNames(), ","),
 	})
 	singleCmd.StringVar(&customUfsModuleFlag, "custom-ufs-module", "",
 		"a percent-separated list of custom ufs modules which has the form of a pipe-separated triplet of module name, ufs type, and its comma-separated maven arguments."+

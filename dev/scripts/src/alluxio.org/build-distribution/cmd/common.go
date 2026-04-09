@@ -99,6 +99,24 @@ var libJars = map[string]struct{}{
 	"underfs-web":           {},
 }
 
+var defaultLibJars = map[string]struct{}{
+	"integration-tools-hms":        {},
+	"integration-tools-validation": {},
+
+	"underfs-abfs":   {},
+	"underfs-adl":    {},
+	"underfs-cos":    {},
+	"underfs-cephfs": {},
+	"underfs-gcs":    {},
+	"underfs-local":  {},
+	"underfs-obs":    {},
+	"underfs-oss":    {},
+	"underfs-s3a":    {},
+	"underfs-swift":  {},
+	"underfs-wasb":   {},
+	"underfs-web":    {},
+}
+
 var fuseLibJars = map[string]struct{}{
 	"underfs-s3a":   {},
 	"underfs-local": {},
@@ -119,6 +137,15 @@ func defaultModules(modules map[string]module) []string {
 		if modules[moduleName].isDefault {
 			result = append(result, moduleName)
 		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func defaultLibJarNames() []string {
+	result := []string{}
+	for jarName := range defaultLibJars {
+		result = append(result, jarName)
 	}
 	sort.Strings(result)
 	return result

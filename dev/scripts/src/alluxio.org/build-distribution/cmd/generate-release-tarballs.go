@@ -23,7 +23,7 @@ func Release(args []string) error {
 	addCommonFlags(releaseCmd, &FlagsOpts{
 		TargetName: fmt.Sprintf("alluxio-%v-bin.tar.gz", versionMarker),
 		UfsModules: strings.Join(defaultModules(ufsModules), ","),
-		LibJars:    libJarsAll,
+		LibJars:    strings.Join(defaultLibJarNames(), ","),
 	})
 	releaseCmd.Parse(args[2:]) // error handling by flag.ExitOnError
 
