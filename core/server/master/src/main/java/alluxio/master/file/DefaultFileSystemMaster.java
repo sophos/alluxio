@@ -3908,11 +3908,33 @@ public class DefaultFileSystemMaster extends CoreMaster
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
     setAclSingleInode(rpcContext, action, inodePath, entries, replay, opTimeMs);
     if (context.getOptions().getRecursive()) {
+      // POSIX default ACLs are a directory-only concept. Upstream
+      // setAclSingleInode throws UnsupportedOperationException on any default
+      // entry applied to a file, which makes `setfacl -R -m "...,default:..."`
+      // abort on the first file encountered in the descendant walk — even
+      // though the correct POSIX-recursive semantics (matching linux setfacl
+      // -R) are "apply default entries to directories, apply only access
+      // entries to files". Partition the entries list once and project it
+      // per-inode-type for each descendant. The non-recursive path (root
+      // inode above and any explicit single-target call) remains strict —
+      // explicitly targeting a file with `default:*` still raises, which is
+      // the user error the guard is there to catch.
+      List<AclEntry> accessOnlyEntries = null;
+      boolean hasDefaultEntries = entries.stream().anyMatch(AclEntry::isDefault);
+      if (hasDefaultEntries) {
+        accessOnlyEntries = entries.stream()
+            .filter(e -> !e.isDefault())
+            .collect(Collectors.toList());
+      }
       try (LockedInodePathList descendants = mInodeTree.getDescendants(inodePath)) {
         int journalFlushCounter = 0;
         for (LockedInodePath childPath : descendants) {
           rpcContext.throwIfCancelled();
-          setAclSingleInode(rpcContext, action, childPath, entries, replay, opTimeMs);
+          List<AclEntry> effectiveEntries = entries;
+          if (hasDefaultEntries && childPath.getInode().isFile()) {
+            effectiveEntries = accessOnlyEntries;
+          }
+          setAclSingleInode(rpcContext, action, childPath, effectiveEntries, replay, opTimeMs);
           journalFlushCounter++;
           if (mMergeInodeJournals
               && journalFlushCounter > mRecursiveOperationForceFlushEntries) {

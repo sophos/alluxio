@@ -13,6 +13,8 @@ The main branch of this fork is `sophos/main`. It was forked from the upstream
   Commit: `f763dfc308df906c0b5f82d89f64be67127eae11`
 - ACL inheritance preservation during metadata sync
   Branch feature: `sophos/release-2.9.6-acl`
+- Recursive `setfacl -R` silently skips default ACL entries on files
+  Branch feature: `sophos/release-2.9.6-acl`
 - Kubernetes TokenReview-based custom authentication provider
   Branch feature: current working tree
 
@@ -86,7 +88,43 @@ alluxio fs -Dalluxio.user.file.metadata.sync.interval=-1 setfacl -R \
 ```
 
 This backfill is still required once after rollout for descendants that were
-materialized before the flag was enabled.
+materialized before the flag was enabled. The mixed access + default entry
+list above works on a subtree that contains files because of the companion
+`setfacl -R` patch described below; on stock Alluxio the same command aborts
+on the first file with "Can not set default ACL for a file".
+
+## `setfacl -R` Skips Default Entries On Files
+
+### What problem this solves
+
+POSIX default ACLs are a directory-only concept, but upstream
+`setAclSingleInode` throws `UnsupportedOperationException` on any default
+entry applied to a file. The recursive driver passes the full entries list
+to every descendant, so `setfacl -R -m "<access>,default:..." <path>` aborts
+on the first file in the walk — setfacl is all-or-nothing per inode.
+
+This breaks the cached-inode backfill pattern that the ACL-inheritance patch
+above explicitly recommends: to propagate refreshed defaults to pre-existing
+cached directories you need to recursively apply a mixed access + default
+entries list over a subtree that mixes dirs and files.
+
+### How it behaves
+
+Inside `setAclRecursive`, the entries list is partitioned once into access
+entries and default entries. For each descendant, the driver checks the
+inode type and projects the list: directories receive the full list,
+files receive access entries only. Matches linux `setfacl -R` semantics.
+
+The non-recursive path — the root inode applied by `setAclRecursive` and any
+explicit single-target call through `setAclSingleInode` — is unchanged.
+Passing `default:*` directly at a file with no recursion still raises
+`UnsupportedOperationException`, which is the user error the guard is there
+to catch.
+
+### No flag
+
+No configuration knob. This is straight POSIX behavior; the previous throw
+was a bug that ACL inheritance depended on fixing to be operationally useful.
 
 ## Kubernetes TokenReview Authentication Provider
 

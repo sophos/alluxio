@@ -110,6 +110,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Unit tests for {@link FileSystemMaster}.
@@ -502,6 +503,50 @@ public final class FileSystemMasterTest extends FileSystemMasterTestBase {
           .convertAclToStringEntries());
       assertEquals(newEntries, entries);
     }
+  }
+
+  /**
+   * Recursive setAcl with a mixed list of access + default entries must succeed
+   * across a subtree that contains files. Upstream Alluxio threw
+   * UnsupportedOperationException ("Can not set default ACL for a file") on the
+   * first file it walked, because {@code setAclSingleInode} rejects any
+   * default entry on a file and the -R walk passed the full entries list to
+   * every descendant. We now partition per inode type inside
+   * {@code setAclRecursive}: dirs get access + default, files get access only.
+   * This matches POSIX semantics (default ACLs are dir-only) and linux setfacl
+   * -R behaviour, and is what makes recursive ACL backfill workable on
+   * cached-inode subtrees that mix dirs and files.
+   */
+  @Test
+  public void setAclRecursiveMixedAccessAndDefaultSkipsDefaultOnFiles() throws Exception {
+    createFileWithSingleBlock(NESTED_FILE_URI);
+    List<AclEntry> mixedEntries = Stream.of(
+        "user:trino-metabase:r-x",
+        "default:user::rwx",
+        "default:group::---",
+        "default:mask::rwx",
+        "default:other::---",
+        "default:user:trino-metabase:r-x")
+        .map(AclEntry::fromCliString)
+        .collect(Collectors.toList());
+
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY, mixedEntries,
+        SetAclContext.mergeFrom(SetAclPOptions.newBuilder().setRecursive(true)));
+
+    // Directory inherited both access and default entries.
+    FileInfo dirInfo = mFileSystemMaster.getFileInfo(NESTED_URI, GET_STATUS_CONTEXT);
+    assertTrue("dir access should carry named entry: " + dirInfo.getAcl().toStringEntries(),
+        dirInfo.getAcl().toStringEntries().contains("user:trino-metabase:r-x"));
+    assertTrue("dir default should carry named entry: " + dirInfo.getDefaultAcl().toStringEntries(),
+        dirInfo.getDefaultAcl().toStringEntries().contains("default:user:trino-metabase:r-x"));
+
+    // File got the access entry; default entries silently skipped, no throw.
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(NESTED_FILE_URI, GET_STATUS_CONTEXT);
+    assertTrue("file access should carry named entry: " + fileInfo.getAcl().toStringEntries(),
+        fileInfo.getAcl().toStringEntries().contains("user:trino-metabase:r-x"));
+    assertTrue("file default ACL must remain empty (POSIX: dir-only): "
+            + fileInfo.getDefaultAcl().toStringEntries(),
+        fileInfo.getDefaultAcl().isEmpty());
   }
 
   @Test
