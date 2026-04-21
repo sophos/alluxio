@@ -7337,6 +7337,16 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
                   .setScope(Scope.ALL)
                   .build();
+  public static final PropertyKey SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL =
+          booleanBuilder(Name.SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL)
+                  .setDefaultValue(false)
+                  .setDescription("Whether metadata sync should preserve a parent directory's "
+                          + "inherited ACL on newly materialized children instead of reopening access "
+                          + "from the UFS mode.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
+                  .setScope(Scope.MASTER)
+                  .setIsDynamic(false)
+                  .build();
   public static final PropertyKey SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS =
           durationBuilder(Name.SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS)
                   .setAlias("alluxio.security.group.mapping.cache.timeout.ms")
@@ -9344,6 +9354,8 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.security.authorization.permission.supergroup";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_UMASK =
             "alluxio.security.authorization.permission.umask";
+    public static final String SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL =
+            "alluxio.security.authorization.sync.inherit-parent-acl";
     public static final String SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS =
             "alluxio.security.group.mapping.cache.timeout";
     public static final String SECURITY_GROUP_MAPPING_CLASS =

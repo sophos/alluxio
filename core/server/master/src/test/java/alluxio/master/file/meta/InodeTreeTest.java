@@ -23,6 +23,7 @@ import alluxio.AlluxioTestDirectory;
 import alluxio.AlluxioURI;
 import alluxio.ConfigurationRule;
 import alluxio.Constants;
+import alluxio.client.WriteType;
 import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
 import alluxio.exception.BlockInfoException;
@@ -51,6 +52,7 @@ import alluxio.master.metastore.rocks.RocksInodeStore;
 import alluxio.master.metrics.MetricsMaster;
 import alluxio.master.metrics.MetricsMasterFactory;
 import alluxio.proto.journal.Journal;
+import alluxio.security.authorization.AclEntry;
 import alluxio.resource.CloseableIterator;
 import alluxio.security.authorization.Mode;
 import alluxio.underfs.UfsManager;
@@ -71,6 +73,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -238,6 +241,57 @@ public final class InodeTreeTest {
     assertEquals("user1", test.getOwner());
     assertEquals("group1", test.getGroup());
     assertEquals(TEST_DIR_MODE.toShort(), test.getMode());
+  }
+
+  @Test
+  public void metadataLoadDirectoryWithoutInheritanceFlagKeepsUfsOtherBits() throws Exception {
+    createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+    setDefaultAcl("/parent",
+        "default:user::rwx",
+        "default:group::---",
+        "default:other::---",
+        "default:user:tenant:r-x");
+
+    CreateDirectoryContext metadataLoadContext = CreateDirectoryContext
+        .mergeFrom(CreateDirectoryPOptions.newBuilder().setMode(new Mode((short) 0707).toProto()))
+        .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+    metadataLoadContext.setMetadataLoad(true, true);
+    metadataLoadContext.setWriteType(WriteType.THROUGH);
+
+    createPath(mTree, new AlluxioURI("/parent/child"), metadataLoadContext);
+
+    MutableInodeDirectory child = getInodeByPath("/parent/child").asDirectory();
+    assertEquals((short) 0707, child.getMode());
+    assertTrue(toCliStrings(child.getACL().getEntries()).contains("other::rwx"));
+    assertTrue(toCliStrings(child.getDefaultACL().getEntries()).contains("default:other::---"));
+  }
+
+  @Test
+  public void metadataLoadDirectoryWithInheritanceFlagPreservesParentAcl() throws Exception {
+    try (Closeable ignored = new ConfigurationRule(
+        PropertyKey.SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL, true,
+        Configuration.modifiableGlobal()).toResource()) {
+      createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+      setDefaultAcl("/parent",
+          "default:user::rwx",
+          "default:group::---",
+          "default:other::---",
+          "default:user:tenant:r-x");
+
+      CreateDirectoryContext metadataLoadContext = CreateDirectoryContext.mergeFrom(
+          CreateDirectoryPOptions.newBuilder().setMode(new Mode((short) 0707).toProto()))
+          .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+      metadataLoadContext.setMetadataLoad(true, true);
+      metadataLoadContext.setWriteType(WriteType.THROUGH);
+
+      createPath(mTree, new AlluxioURI("/parent/child"), metadataLoadContext);
+
+      MutableInodeDirectory child = getInodeByPath("/parent/child").asDirectory();
+      assertEquals((short) 0700, child.getMode());
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("other::---"));
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("user:tenant:r-x"));
+      assertTrue(toCliStrings(child.getDefaultACL().getEntries()).contains("default:user:tenant:r-x"));
+    }
   }
 
   /**
@@ -1054,6 +1108,18 @@ public final class InodeTreeTest {
              mTree.lockFullInodePath(path, LockPattern.READ, NoopJournalContext.INSTANCE)) {
       return mInodeStore.getMutable(inodePath.getInode().getId()).get();
     }
+  }
+
+  private void setDefaultAcl(String path, String... entries) {
+    getInodeByPath(path).setAcl(Arrays.stream(entries)
+        .map(AclEntry::fromCliString)
+        .collect(Collectors.toList()));
+  }
+
+  private List<String> toCliStrings(Iterable<AclEntry> entries) {
+    return StreamSupport.stream(entries.spliterator(), false)
+        .map(AclEntry::toCliString)
+        .collect(Collectors.toList());
   }
 
   // Helper to delete an inode by path.

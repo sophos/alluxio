@@ -1003,6 +1003,8 @@ public class InodeTree implements DelegatingJournaled {
       short mode = context.isMetadataLoad() ? Mode.createFullAccess().toShort()
           : newDir.getMode();
       DefaultAccessControlList dAcl = currentInodeDirectory.getDefaultACL();
+      boolean preserveInheritedAcl =
+          shouldPreserveInheritedAclOnMetadataLoad(context, dAcl);
       if (!dAcl.isEmpty()) {
         Pair<AccessControlList, DefaultAccessControlList> pair =
             dAcl.generateChildDirACL(mode);
@@ -1016,8 +1018,10 @@ public class InodeTree implements DelegatingJournaled {
           // if we are creating the file as a result of loading metadata, the newDir is already
           // persisted, and we got the permissions info from the ufs.
           newDir.setOwner(context.getOwner().intern())
-              .setGroup(context.getGroup().intern())
-              .setMode(context.getMode().toShort());
+              .setGroup(context.getGroup().intern());
+          if (!preserveInheritedAcl) {
+            newDir.setMode(context.getMode().toShort());
+          }
 
           Long operationTimeMs = context.getOperationTimeMs();
           if (operationTimeMs != null) {
@@ -1092,6 +1096,13 @@ public class InodeTree implements DelegatingJournaled {
       newInode.setOwner(ancestorInode.getOwner().intern());
       newInode.setGroup(ancestorInode.getGroup().intern());
     }
+  }
+
+  private static boolean shouldPreserveInheritedAclOnMetadataLoad(
+      CreatePathContext<?, ?> context, DefaultAccessControlList parentDefaultAcl) {
+    return context.isMetadataLoad()
+        && !parentDefaultAcl.isEmpty()
+        && Configuration.getBoolean(PropertyKey.SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL);
   }
 
   /**
