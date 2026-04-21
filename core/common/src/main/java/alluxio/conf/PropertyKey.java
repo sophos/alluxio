@@ -7367,6 +7367,18 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
                   .setScope(Scope.MASTER)
                   .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH)
+                  .setDefaultValue("")
+                  .setDescription("Client-side path to a Kubernetes projected ServiceAccount "
+                          + "token. When non-empty and authentication type is CUSTOM, the token "
+                          + "is sent as the SASL password so the master-side Kubernetes token "
+                          + "authentication provider can validate the caller via the TokenReview "
+                          + "API. Leave empty to disable token-based client authentication; the "
+                          + "module then opts out and the caller authenticates as under SIMPLE.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.CLIENT)
+                  .build();
   public static final PropertyKey SECURITY_AUTHORIZATION_PERMISSION_ENABLED =
           booleanBuilder(Name.SECURITY_AUTHORIZATION_PERMISSION_ENABLED)
                   .setDefaultValue(true)
@@ -9418,6 +9430,8 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.security.authentication.k8s.service.account.name.template";
     public static final String SECURITY_AUTHENTICATION_K8S_CACHE_TTL =
             "alluxio.security.authentication.k8s.cache.ttl";
+    public static final String SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH =
+            "alluxio.security.authentication.k8s.client.token.path";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_ENABLED =
             "alluxio.security.authorization.permission.enabled";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_SUPERGROUP =
