@@ -7311,6 +7311,62 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setScope(Scope.ALL)
                   .setIsDynamic(false)
                   .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_API_ENDPOINT =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_API_ENDPOINT)
+                  .setDefaultValue("https://kubernetes.default.svc")
+                  .setDescription("The Kubernetes API server endpoint used by the custom "
+                          + "Kubernetes token authentication provider.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_CA_PATH =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_CA_PATH)
+                  .setDefaultValue("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+                  .setDescription("The CA certificate path used to validate the Kubernetes API "
+                          + "server for the custom Kubernetes token authentication provider.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_TOKEN_PATH =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_TOKEN_PATH)
+                  .setDefaultValue("/var/run/secrets/kubernetes.io/serviceaccount/token")
+                  .setDescription("The service account token path used by the Alluxio master to "
+                          + "call the Kubernetes TokenReview API.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_AUDIENCE =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_AUDIENCE)
+                  .setDefaultValue("alluxio-master")
+                  .setDescription("The Kubernetes token audience required by the custom "
+                          + "Kubernetes token authentication provider.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAMESPACE =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAMESPACE)
+                  .setDefaultValue("")
+                  .setDescription("The Kubernetes namespace expected in TokenReview responses "
+                          + "for the custom Kubernetes token authentication provider.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAME_TEMPLATE =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAME_TEMPLATE)
+                  .setDefaultValue("trino-{user}-sa")
+                  .setDescription("The service account name template matched against TokenReview "
+                          + "responses. The template must contain exactly one '{user}' placeholder.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_CACHE_TTL =
+          durationBuilder(Name.SECURITY_AUTHENTICATION_K8S_CACHE_TTL)
+                  .setDefaultValue("30sec")
+                  .setDescription("How long successful Kubernetes TokenReview authentication "
+                          + "results are cached by the custom Kubernetes token authentication provider.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
   public static final PropertyKey SECURITY_AUTHORIZATION_PERMISSION_ENABLED =
           booleanBuilder(Name.SECURITY_AUTHORIZATION_PERMISSION_ENABLED)
                   .setDefaultValue(true)
@@ -9348,6 +9404,20 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.security.authentication.custom.provider.class";
     public static final String SECURITY_AUTHENTICATION_TYPE =
             "alluxio.security.authentication.type";
+    public static final String SECURITY_AUTHENTICATION_K8S_API_ENDPOINT =
+            "alluxio.security.authentication.k8s.api.endpoint";
+    public static final String SECURITY_AUTHENTICATION_K8S_CA_PATH =
+            "alluxio.security.authentication.k8s.ca.path";
+    public static final String SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_TOKEN_PATH =
+            "alluxio.security.authentication.k8s.service.account.token.path";
+    public static final String SECURITY_AUTHENTICATION_K8S_AUDIENCE =
+            "alluxio.security.authentication.k8s.audience";
+    public static final String SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAMESPACE =
+            "alluxio.security.authentication.k8s.service.account.namespace";
+    public static final String SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAME_TEMPLATE =
+            "alluxio.security.authentication.k8s.service.account.name.template";
+    public static final String SECURITY_AUTHENTICATION_K8S_CACHE_TTL =
+            "alluxio.security.authentication.k8s.cache.ttl";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_ENABLED =
             "alluxio.security.authorization.permission.enabled";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_SUPERGROUP =
