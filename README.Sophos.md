@@ -19,7 +19,15 @@ The main branch of this fork is `sophos/main`. It was forked from the upstream
   access-mask auto-recompute (and vice versa)
   Branch feature: `sophos/release-2.9.6-acl`
 - Kubernetes TokenReview-based custom authentication provider
-  Branch feature: current working tree
+  Branch feature: `sophos/release-2.9.6-acl`
+- Internal Alluxio service account pass-through in the TokenReview provider,
+  so Alluxio's own master↔master and worker↔master RPCs authenticate under
+  the same `CUSTOM` auth mode as external tenants
+  Branch feature: `sophos/release-2.9.6-acl`
+- Helm chart: `alluxio.extraVolumes` / `alluxio.extraVolumeMounts` helpers
+  extended to accept `projected` volumes (required by the TokenReview
+  provider, which only trusts audience-bound projected tokens)
+  Branch feature: `sophos/release-2.9.6-acl`
 
 ## ACL Inheritance On Metadata Sync
 
@@ -199,6 +207,10 @@ This change adds the server-side provider and its configuration surface:
 - `alluxio.security.authentication.k8s.service.account.namespace`
 - `alluxio.security.authentication.k8s.service.account.name.template`
 - `alluxio.security.authentication.k8s.cache.ttl`
+- `alluxio.security.authentication.k8s.internal.service.account.name`
+  (optional, see "Internal Alluxio service account pass-through" below)
+- `alluxio.security.authentication.k8s.internal.user`
+  (optional, defaults to `alluxio`)
 
 The provider validates:
 
@@ -235,6 +247,33 @@ alluxio.security.authentication.k8s.service.account.name.template=trino-{user}-s
 alluxio.security.authentication.k8s.cache.ttl=30sec
 ```
 
+### Internal Alluxio service account pass-through
+
+The `service.account.name.template` is shaped for external tenant clients
+(e.g. a Trino `trino-metabase` pod authenticating as the `trino-metabase`
+Alluxio user out of `trino-metabase-sa`). Alluxio's own master↔master and
+worker↔master RPCs do not fit that shape: they authenticate as the built-in
+user `alluxio` from an AZ-scoped SA such as `alluxio-eu-west-1a-sa`, which
+cannot be expressed in `trino-{user}-sa` without also accidentally matching
+legitimate external tenants whose user happens to equal the AZ suffix.
+
+When the two optional master properties below are set, the provider
+short-circuits the template match for any TokenReview whose reviewed SA
+equals `internal.service.account.name`, accepting the request iff the
+claimed Alluxio user equals `internal.user`:
+
+```properties
+alluxio.security.authentication.k8s.internal.service.account.name=alluxio-eu-west-1a-sa
+alluxio.security.authentication.k8s.internal.user=alluxio
+```
+
+Leaving `internal.service.account.name` unset (the default) preserves
+template-only behaviour, so the short-circuit is inert for deployments that
+do not need it.
+
+Both properties are MASTER-scoped; the provider is never constructed on the
+client, so clients see no behaviour change.
+
 ### Matching examples
 
 With:
@@ -262,6 +301,23 @@ These are rejected:
   Example: TokenReview user `...:trino-ng-sa` while the client claims `trino-metabase`
 - Wrong audience
   Example: TokenReview response does not include `alluxio-master`
+
+With the internal-SA configuration on top:
+
+```properties
+alluxio.security.authentication.k8s.internal.service.account.name=alluxio-eu-west-1a-sa
+alluxio.security.authentication.k8s.internal.user=alluxio
+```
+
+These TokenReview identities are additionally accepted:
+
+- `system:serviceaccount:group-central-data-platform:alluxio-eu-west-1a-sa`
+  Claimed user: `alluxio` (anything else is rejected)
+
+These are still rejected:
+
+- `system:serviceaccount:group-central-data-platform:alluxio-eu-west-1a-sa`
+  claiming user `trino-metabase` — SA matches internal but claimed user does not
 
 ### Example Kubernetes setup
 
@@ -316,6 +372,68 @@ volumes:
    in the SASL password field.
 4. Set `alluxio.security.authentication.type=CUSTOM`.
 5. Watch authentication failures and TokenReview volume.
+
+## Alluxio Helm Chart: Projected Volume Support
+
+### What problem this solves
+
+The Kubernetes TokenReview provider above only trusts tokens whose `aud`
+claim matches `alluxio.security.authentication.k8s.audience`. The legacy
+ServiceAccount token at
+`/var/run/secrets/kubernetes.io/serviceaccount/token` is stamped with the
+API-server default audience and is therefore rejected. The only standard
+way to obtain an audience-bound token is a projected ServiceAccount token
+volume.
+
+The chart shipped in the binary tarball at
+`integration/kubernetes/helm-chart/alluxio/` is the natural mount point for
+this, but upstream's `alluxio.extraVolumes` and `alluxio.extraVolumeMounts`
+helpers hardcode the volume type to `configMap` / `emptyDir` and
+unconditionally emit a `readOnly:` field, so a `projected` volume cannot be
+expressed through values.
+
+### How it behaves
+
+The two helper templates in
+`integration/kubernetes/helm-chart/alluxio/templates/_helpers.tpl` are
+extended minimally:
+
+- `alluxio.extraVolumes`: adds a `projected` case that passes
+  `volume.projected.sources` through verbatim, so any projection source
+  type (not only `serviceAccountToken`) is supported.
+- `alluxio.extraVolumeMounts`: the `readOnly:` field is now only emitted
+  when the caller explicitly sets it, so existing callers that leave it
+  unset no longer regress.
+
+The `configMap` and `emptyDir` branches are unchanged.
+
+### Why it lives here
+
+The tarball builder (`dev/scripts/.../generate-tarball.go`) copies this
+chart directory verbatim into every `alluxio-<version>-bin.tar.gz`
+release, so downstream consumers that pull the chart out of the tarball
+automatically pick up the patch. Fixing it upstream in the fork keeps the
+chart source of truth and the Java source of truth in one repository and
+avoids downstream forks of the same helper.
+
+### Example values
+
+```yaml
+master:
+  extraVolumes:
+    - name: alluxio-token
+      projected:
+        defaultMode: 420
+        sources:
+          - serviceAccountToken:
+              audience: alluxio-master
+              expirationSeconds: 3600
+              path: token
+  extraVolumeMounts:
+    - name: alluxio-token
+      mountPath: /var/run/secrets/alluxio
+      readOnly: true
+```
 
 ## Putting Both Changes Together
 

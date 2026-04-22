@@ -124,6 +124,49 @@ public final class K8sTokenAuthenticationProviderTest {
         successResponse("team", "trino-metabase-sa")), new ManualTicker());
   }
 
+  @Test
+  public void authenticateAcceptsInternalServiceAccountAsConfiguredUser() throws Exception {
+    InstancedConfiguration conf = createBaseConf();
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME,
+        "alluxio-eu-west-1a-sa");
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_USER, "alluxio");
+    K8sTokenAuthenticationProvider provider = new K8sTokenAuthenticationProvider(conf,
+        new CountingTokenReviewer(successResponse("team", "alluxio-eu-west-1a-sa")),
+        new ManualTicker());
+
+    provider.authenticate("alluxio", "token");
+  }
+
+  @Test
+  public void authenticateRejectsInternalServiceAccountWithWrongClaimedUser() throws Exception {
+    InstancedConfiguration conf = createBaseConf();
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME,
+        "alluxio-eu-west-1a-sa");
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_USER, "alluxio");
+    K8sTokenAuthenticationProvider provider = new K8sTokenAuthenticationProvider(conf,
+        new CountingTokenReviewer(successResponse("team", "alluxio-eu-west-1a-sa")),
+        new ManualTicker());
+
+    mThrown.expect(AuthenticationException.class);
+    mThrown.expectMessage("internal service account");
+    provider.authenticate("trino-metabase", "token");
+  }
+
+  @Test
+  public void authenticateStillMatchesTemplateWhenInternalServiceAccountConfigured()
+      throws Exception {
+    InstancedConfiguration conf = createBaseConf();
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME,
+        "alluxio-eu-west-1a-sa");
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_USER, "alluxio");
+    K8sTokenAuthenticationProvider provider = new K8sTokenAuthenticationProvider(conf,
+        new CountingTokenReviewer(successResponse("team", "trino-metabase-sa")),
+        new ManualTicker());
+
+    provider.authenticate("trino-metabase", "token");
+  }
+
+
   private static InstancedConfiguration createBaseConf() {
     InstancedConfiguration conf = Configuration.copyGlobal();
     conf.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_AUDIENCE, "alluxio-master");

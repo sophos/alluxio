@@ -7379,6 +7379,33 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
                   .setScope(Scope.CLIENT)
                   .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME)
+                  .setDefaultValue("")
+                  .setDescription("Name of the Kubernetes ServiceAccount shared by Alluxio "
+                          + "master and worker pods inside this cluster. When a TokenReview "
+                          + "response identifies the caller as this ServiceAccount (within "
+                          + "the configured service.account.namespace), the provider attributes "
+                          + "the request to the user configured via "
+                          + Name.SECURITY_AUTHENTICATION_K8S_INTERNAL_USER
+                          + " instead of running the caller through the "
+                          + Name.SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAME_TEMPLATE
+                          + " pattern. Leave empty to disable internal-SA attribution; all "
+                          + "callers then go through the external template matcher.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHENTICATION_K8S_INTERNAL_USER =
+          stringBuilder(Name.SECURITY_AUTHENTICATION_K8S_INTERNAL_USER)
+                  .setDefaultValue("alluxio")
+                  .setDescription("Claimed user name accepted when the TokenReview response "
+                          + "matches " + Name.SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME
+                          + ". Defaults to 'alluxio' to match the "
+                          + Name.SECURITY_LOGIN_USERNAME
+                          + " convention used by master and worker pods.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.MASTER)
+                  .build();
   public static final PropertyKey SECURITY_AUTHORIZATION_PERMISSION_ENABLED =
           booleanBuilder(Name.SECURITY_AUTHORIZATION_PERMISSION_ENABLED)
                   .setDefaultValue(true)
@@ -9432,6 +9459,10 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.security.authentication.k8s.cache.ttl";
     public static final String SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH =
             "alluxio.security.authentication.k8s.client.token.path";
+    public static final String SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME =
+            "alluxio.security.authentication.k8s.internal.service.account.name";
+    public static final String SECURITY_AUTHENTICATION_K8S_INTERNAL_USER =
+            "alluxio.security.authentication.k8s.internal.user";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_ENABLED =
             "alluxio.security.authorization.permission.enabled";
     public static final String SECURITY_AUTHORIZATION_PERMISSION_SUPERGROUP =

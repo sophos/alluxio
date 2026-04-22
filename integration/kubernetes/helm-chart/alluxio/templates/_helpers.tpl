@@ -401,18 +401,30 @@ Extra volume mounts that can be added to a container
   {{- range $volMount := .extraVolumeMounts }}
 - name: {{ $volMount.name }}
   mountPath: {{ $volMount.mountPath }}
+  {{- if hasKey $volMount "readOnly" }}
   readOnly: {{ $volMount.readOnly }}
+  {{- end }}
   {{- end }}
 {{- end -}}
 
 {{/*
-Extra volumes that can be added to a pod
-@param .extraVolumes    An object representing a list of volume mounts.
-                        Can use either configMap or emptyDir.
+Extra volumes that can be added to a pod.
+
+Sophos fork (CSA-21750): extended upstream helper to also accept a
+`projected` key so callers can mount projected ServiceAccount tokens
+(required for the K8sTokenLoginModule used by CUSTOM auth — legacy SA
+tokens at /var/run/secrets/kubernetes.io/serviceaccount/token cannot
+carry a custom audience). The `configMap` / `emptyDir` branches below
+are the untouched upstream behaviour.
+
+@param .extraVolumes    An object representing a list of volumes.
+                        Can use configMap, projected, or emptyDir.
                         Each volume can contain the following fields:
                             volume.name
                             volume.configMap.defaultMode
                             volume.configMap.name
+                            volume.projected.defaultMode
+                            volume.projected.sources          (raw passthrough)
                             volume.emptyDir
 */}}
 {{- define "alluxio.extraVolumes" -}}
@@ -426,6 +438,13 @@ Extra volumes that can be added to a pod
     {{- if $vol.configMap.name }}
     name: {{ $vol.configMap.name }}
     {{- end}}
+  {{- else if $vol.projected }}
+  projected:
+    {{- if $vol.projected.defaultMode }}
+    defaultMode: {{ $vol.projected.defaultMode }}
+    {{- end }}
+    sources:
+{{ toYaml $vol.projected.sources | indent 4 }}
   {{- else }}
   emptyDir: {{ $vol.emptyDir | default "{}" }}
   {{- end }}

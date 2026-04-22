@@ -63,6 +63,8 @@ public class K8sTokenAuthenticationProvider implements AuthenticationProvider {
   private final String mAudience;
   private final String mNamespace;
   private final Pattern mServiceAccountNamePattern;
+  private final String mInternalServiceAccountName;
+  private final String mInternalUser;
   private final TokenReviewer mTokenReviewer;
   private final Ticker mTicker;
   private final long mCacheTtlNanos;
@@ -88,6 +90,10 @@ public class K8sTokenAuthenticationProvider implements AuthenticationProvider {
     mServiceAccountNamePattern = compileTemplate(requireNonEmpty(
         conf.getString(PropertyKey.SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAME_TEMPLATE),
         PropertyKey.SECURITY_AUTHENTICATION_K8S_SERVICE_ACCOUNT_NAME_TEMPLATE));
+    mInternalServiceAccountName = Strings.nullToEmpty(
+        conf.getString(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_SERVICE_ACCOUNT_NAME));
+    mInternalUser = Strings.nullToEmpty(
+        conf.getString(PropertyKey.SECURITY_AUTHENTICATION_K8S_INTERNAL_USER));
     mCacheTtlNanos = TimeUnit.MILLISECONDS.toNanos(
         conf.getMs(PropertyKey.SECURITY_AUTHENTICATION_K8S_CACHE_TTL));
     mTokenReviewer = Preconditions.checkNotNull(reviewer, "reviewer");
@@ -168,6 +174,24 @@ public class K8sTokenAuthenticationProvider implements AuthenticationProvider {
       throw new AuthenticationException(String.format(
           "Kubernetes service account namespace mismatch. Expected %s but got %s",
           mNamespace, namespace));
+    }
+
+    // Internal-SA short-circuit: tokens minted for the Alluxio pods' own SA
+    // (shared by master + worker within an AZ-scoped cluster) cannot match
+    // the trino-{user}-sa template by construction, so let operators opt in
+    // by naming that SA explicitly and mapping it to a fixed claimed user
+    // (defaults to "alluxio", matching the alluxio.security.login.username
+    // convention). Keeps master↔master and worker↔master RPCs working under
+    // CUSTOM without broadening the external template to match
+    // internal-infra SAs by accident.
+    if (!mInternalServiceAccountName.isEmpty()
+        && mInternalServiceAccountName.equals(serviceAccountName)) {
+      if (claimedUser.equals(mInternalUser)) {
+        return true;
+      }
+      throw new AuthenticationException(String.format(
+          "Kubernetes internal service account %s presented with unexpected claimed user %s "
+              + "(expected %s)", serviceAccountName, claimedUser, mInternalUser));
     }
 
     Matcher matcher = mServiceAccountNamePattern.matcher(serviceAccountName);
