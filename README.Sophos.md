@@ -15,6 +15,9 @@ The main branch of this fork is `sophos/main`. It was forked from the upstream
   Branch feature: `sophos/release-2.9.6-acl`
 - Recursive `setfacl -R` silently skips default ACL entries on files
   Branch feature: `sophos/release-2.9.6-acl`
+- Per-side `updateMask` gate: explicit default mask no longer suppresses
+  access-mask auto-recompute (and vice versa)
+  Branch feature: `sophos/release-2.9.6-acl`
 - Kubernetes TokenReview-based custom authentication provider
   Branch feature: current working tree
 
@@ -125,6 +128,54 @@ to catch.
 
 No configuration knob. This is straight POSIX behavior; the previous throw
 was a bug that ACL inheritance depended on fixing to be operationally useful.
+
+## Per-Side `updateMask` Gate
+
+### What problem this solves
+
+`MutableInode.updateMask(entries)` is the hook `setAcl` uses to recompute the
+POSIX mask after named/owning-group entries change. Upstream treated ANY
+`AclEntryType.MASK` in the input list as a global "caller supplied mask,
+don't touch anything" signal and returned immediately — regardless of whether
+the supplied mask was an access mask or a default mask.
+
+That silently broke the exact workflow this fork exists to support. The
+alluxio-config ACL backfill applies a mixed spec per mount, e.g.:
+
+```
+user:trino-metabase:r-x,
+default:user::rwx, default:group::---,
+default:mask::rwx, default:other::---,
+default:user:trino-metabase:r-x
+```
+
+The list carries a named-user *access* grant AND an explicit *default* mask,
+but NO explicit access mask. On a fresh-from-sync inode whose
+`ExtendedACLEntries` mask is still the initialised `---`, the upstream
+early-return skipped the access-mask recompute. The named entry was then
+AND'ed against a `---` mask and the tenant that was just granted `r-x` got
+denied. Externally this looked like new UFS-synced partitions being
+unreadable to a user who clearly had an ACL for them (confirmed via
+`getfacl`: `mask::---` shadowing `user:trino-metabase:r-x`).
+
+### How it behaves
+
+`updateMask` now tracks access-side and default-side mask presence in the
+input list independently, and gates auto-recompute per side:
+
+- access mask provided → skip access-mask recompute, honour supplied value
+- access mask NOT provided → recompute access mask from named/owning-group
+- same rule for default mask, independently
+
+This matches linux `setfacl` semantics. It means a caller can explicitly set
+`default:mask::rwx` and still have the access mask auto-computed to cover
+whatever named entries are in the same call.
+
+### No flag
+
+No configuration knob. The upstream behaviour was a bug; there is no
+scenario where you would want supplying a default mask to also freeze the
+access mask at its ExtendedACLEntries initial value.
 
 ## Kubernetes TokenReview Authentication Provider
 

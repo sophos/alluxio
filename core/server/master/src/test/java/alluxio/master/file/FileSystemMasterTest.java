@@ -549,6 +549,60 @@ public final class FileSystemMasterTest extends FileSystemMasterTestBase {
         fileInfo.getDefaultAcl().isEmpty());
   }
 
+  /**
+   * Regression: a setfacl that supplies a named-user access entry plus an
+   * explicit default mask (but NO explicit access mask) must still auto-
+   * recompute the access mask from the new named entry. Upstream Alluxio's
+   * {@code MutableInode.updateMask(entries)} early-returned on ANY mask entry,
+   * treating "caller supplied mask" as a global suppression — which meant
+   * mixing {@code user:name:r-x} with {@code default:mask::rwx} left the
+   * fresh-inode access mask at --- (ExtendedACLEntries default), AND'ing the
+   * named entry down to zero. On the Sophos fork this is exactly what the
+   * alluxio-config ACL backfill generates (access-side named grant +
+   * `default:*` block including `default:mask::rwx`), so new UFS-synced
+   * partitions were silently unreadable to the very tenant they were meant
+   * to be granted to. The patch in MutableInode tracks access/default mask
+   * presence independently and lets each side auto-recompute unless that
+   * specific side was supplied — matching linux setfacl semantics.
+   */
+  @Test
+  public void setAclMixedNamedUserAndDefaultMaskAutoComputesAccessMask() throws Exception {
+    mFileSystemMaster.createDirectory(NESTED_URI, CreateDirectoryContext
+        .mergeFrom(CreateDirectoryPOptions.newBuilder().setRecursive(true)));
+
+    List<AclEntry> mixedEntries = Stream.of(
+        "user:trino-metabase:r-x",
+        "default:user::rwx",
+        "default:group::---",
+        "default:mask::rwx",
+        "default:other::---",
+        "default:user:trino-metabase:r-x")
+        .map(AclEntry::fromCliString)
+        .collect(Collectors.toList());
+
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY, mixedEntries,
+        SetAclContext.defaults());
+
+    List<String> accessEntries = mFileSystemMaster
+        .getFileInfo(NESTED_URI, GET_STATUS_CONTEXT).getAcl().toStringEntries();
+    // Named user r-x ∪ owning group --- = r-x — the mask must be r-x, NOT ---
+    // (the ExtendedACLEntries default). With the old early-return bug this
+    // assertion would fail: the mask would be mask::--- and the named entry
+    // would be effectively ---, denying the tenant.
+    assertTrue("access mask must be auto-recomputed to r-x, got: " + accessEntries,
+        accessEntries.contains("mask::r-x"));
+    assertTrue("named user entry must still be present: " + accessEntries,
+        accessEntries.contains("user:trino-metabase:r-x"));
+
+    // The explicitly-supplied default mask must be preserved verbatim — the
+    // per-side gate must NOT recompute the default mask, because the caller
+    // said "I want default:mask::rwx" and we honour it.
+    List<String> defaultEntries = mFileSystemMaster
+        .getFileInfo(NESTED_URI, GET_STATUS_CONTEXT).getDefaultAcl().toStringEntries();
+    assertTrue("default mask must be preserved as supplied: " + defaultEntries,
+        defaultEntries.contains("default:mask::rwx"));
+  }
+
   @Test
   public void removeExtendedAclMask() throws Exception {
     mFileSystemMaster.createDirectory(NESTED_URI, CreateDirectoryContext

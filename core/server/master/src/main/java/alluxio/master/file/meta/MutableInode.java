@@ -258,6 +258,20 @@ public abstract class MutableInode<T extends MutableInode> implements InodeView 
   public T updateMask(List<AclEntry> entries) {
     boolean needToUpdateACL = false;
     boolean needToUpdateDefaultACL = false;
+    // Upstream Alluxio early-returned on ANY mask entry, treating "caller
+    // supplied a mask" as a blanket suppression of auto-recompute for BOTH
+    // the access and the default mask. That is wrong when a caller mixes an
+    // access-side principal grant with an explicit default mask (common on
+    // the Sophos fork because the ACL backfill always re-stamps the full
+    // default block). In that case the access mask is NOT supplied, so it
+    // should be recomputed from owning-group ∪ named-user ∪ named-group —
+    // otherwise a fresh ExtendedACLEntries (mask initialised to ---) masks
+    // every named entry down to ---, which denies the tenant that was just
+    // granted r-x. Track access/default mask presence independently and let
+    // each side's auto-recompute run unless that specific side was
+    // explicitly supplied. Matches linux setfacl semantics.
+    boolean accessMaskProvided = false;
+    boolean defaultMaskProvided = false;
 
     for (AclEntry entry : entries) {
       if (entry.getType().equals(AclEntryType.NAMED_USER)
@@ -270,15 +284,18 @@ public abstract class MutableInode<T extends MutableInode> implements InodeView 
         }
       }
       if (entry.getType().equals(AclEntryType.MASK)) {
-        // If mask is explicitly set or removed then we don't need to update the mask
-        return getThis();
+        if (entry.isDefault()) {
+          defaultMaskProvided = true;
+        } else {
+          accessMaskProvided = true;
+        }
       }
     }
-    if (needToUpdateACL) {
+    if (needToUpdateACL && !accessMaskProvided) {
       mAcl.updateMask();
     }
 
-    if (needToUpdateDefaultACL) {
+    if (needToUpdateDefaultACL && !defaultMaskProvided) {
       getDefaultACL().updateMask();
     }
     return getThis();
