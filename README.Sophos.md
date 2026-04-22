@@ -435,6 +435,56 @@ master:
       readOnly: true
 ```
 
+## Alluxio Helm Chart: Writable Overlays for readOnlyRootFilesystem
+
+### What problem this solves
+
+A prior security-hardening commit to the same chart added
+`readOnlyRootFilesystem: true` to the `alluxio-master`, `alluxio-job-master`,
+`alluxio-worker`, and `alluxio-job-worker` containers (to close Trivy
+finding KSV-0014). That flag clashes with the image entrypoint
+(`integration/docker/entrypoint.sh`), which runs at `WORKDIR=/opt/alluxio`
+and conditionally writes under `conf/`:
+
+- `conf/alluxio-env.sh` (from selected env vars)
+- `conf/log4j.properties` (copied from the baked `/tmp/log4j.properties`
+  template, or overwritten from `$ALLUXIO_LOG4J_PROPERTIES`)
+- `conf/alluxio-site.properties` (from `$ALLUXIO_SITE_PROPERTIES`)
+
+Under a read-only root filesystem those writes fail and the pod never
+reaches the Alluxio start command. The baked `/opt/alluxio/conf/` directory
+shipped in the image also has to remain visible to the running process, so
+a plain emptyDir mount at `/opt/alluxio/conf` would shadow the baked files.
+
+### How it behaves
+
+Both `templates/master/statefulset.yaml` and `templates/worker/daemonset.yaml`
+now:
+
+1. Declare a `seed-alluxio-conf` initContainer that runs the Alluxio image
+   itself and copies `/opt/alluxio/conf/.` into a shared emptyDir
+   (`alluxio-conf`) before the main containers start.
+2. Mount three emptyDir volumes into every application container:
+   - `alluxio-conf` at `/opt/alluxio/conf` (seeded with the baked
+     configuration, now writable),
+   - `alluxio-logs` at `/opt/alluxio/logs`,
+   - `tmp` at `/tmp`.
+3. Register those emptyDirs at the pod level so they can be shared across
+   the two containers that live in each master StatefulSet pod / each
+   worker DaemonSet pod.
+
+The change is confined to the two templates and does not touch values,
+helpers, or the logserver template (logserver does not carry
+`readOnlyRootFilesystem: true`).
+
+### Why it lives here
+
+Same reason as the projected-volume helper above: the tarball builder
+copies this chart directory verbatim into every
+`alluxio-<version>-bin.tar.gz`, and keeping the chart source of truth in
+the fork prevents downstream patches from drifting away from the image
+(entrypoint, Dockerfile, and chart all move together on release).
+
 ## Putting Both Changes Together
 
 For shared Alluxio used by multiple Trino groups, the intended pairing is:

@@ -105,6 +105,17 @@ spec:
           - name: alluxio-journal
             mountPath: {{ .Values.journal.folder }}
       {{- end}}
+      # Sophos fork (CSA-21750): seed baked /opt/alluxio/conf contents into a
+      # writable emptyDir so the main container -- which runs with
+      # readOnlyRootFilesystem: true (KSV-0014) -- can still write
+      # conf/log4j.properties and conf/alluxio-site.properties in entrypoint.sh.
+      - name: seed-alluxio-conf
+        image: {{ .Values.image }}:{{ .Values.imageTag }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        command: ["sh", "-c", "cp -a /opt/alluxio/conf/. /mnt/alluxio-conf/"]
+        volumeMounts:
+          - name: alluxio-conf
+            mountPath: /mnt/alluxio-conf
       shareProcessNamespace: {{ .Values.master.shareProcessNamespace | default false }}
       containers:
         {{- if .Values.master.extraContainers }}
@@ -178,6 +189,15 @@ spec:
             name: embedded
           {{- end }}
           volumeMounts:
+            # Sophos fork (CSA-21750): writable overlays required by
+            # readOnlyRootFilesystem: true above. conf/ is seeded from the image
+            # by the seed-alluxio-conf initContainer.
+            - name: alluxio-conf
+              mountPath: /opt/alluxio/conf
+            - name: alluxio-logs
+              mountPath: /opt/alluxio/logs
+            - name: tmp
+              mountPath: /tmp
             {{- if .Values.master.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.master.extraVolumeMounts) | indent 12 }}
             {{- end }}
@@ -274,6 +294,13 @@ spec:
             name: job-embedded
           {{- end }}
           volumeMounts:
+            # Sophos fork (CSA-21750): writable overlays for readOnlyRootFilesystem.
+            - name: alluxio-conf
+              mountPath: /opt/alluxio/conf
+            - name: alluxio-logs
+              mountPath: /opt/alluxio/logs
+            - name: tmp
+              mountPath: /tmp
           {{- if .Values.master.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.master.extraVolumeMounts) | indent 12 }}
           {{- end }}
@@ -296,6 +323,16 @@ spec:
           {{- end }}
       restartPolicy: Always
       volumes:
+        # Sophos fork (CSA-21750): emptyDir volumes backing the writable
+        # overlays required by readOnlyRootFilesystem on the master and
+        # job-master containers. alluxio-conf is seeded from the baked image
+        # /opt/alluxio/conf by the seed-alluxio-conf initContainer.
+        - name: alluxio-conf
+          emptyDir: {}
+        - name: alluxio-logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
         {{- if .Values.master.extraVolumes }}
 {{- include "alluxio.extraVolumes" (dict "extraVolumes" .Values.master.extraVolumes) | indent 8 }}
         {{- end }}
