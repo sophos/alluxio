@@ -96,7 +96,11 @@ spec:
       - name: seed-alluxio-conf
         image: {{ .Values.image }}:{{ .Values.imageTag }}
         imagePullPolicy: {{ .Values.imagePullPolicy }}
-        command: ["sh", "-c", "cp -a /opt/alluxio/conf/. /mnt/alluxio-conf/"]
+        # `cp -R` (NOT `cp -a`) on purpose -- see master/statefulset.yaml seed
+        # initContainer for the full explanation. TL;DR: runAsUser:1000 can't
+        # call utimes() on the root-owned emptyDir mount point, so `cp -a`
+        # crashes at the end; `cp -R` avoids the syscall entirely.
+        command: ["sh", "-c", "cp -R /opt/alluxio/conf/. /mnt/alluxio-conf/"]
         volumeMounts:
           - name: alluxio-conf
             mountPath: /mnt/alluxio-conf

@@ -112,7 +112,15 @@ spec:
       - name: seed-alluxio-conf
         image: {{ .Values.image }}:{{ .Values.imageTag }}
         imagePullPolicy: {{ .Values.imagePullPolicy }}
-        command: ["sh", "-c", "cp -a /opt/alluxio/conf/. /mnt/alluxio-conf/"]
+        # `cp -R` (NOT `cp -a`) on purpose: the pod runs as runAsUser:1000 /
+        # fsGroup:0, so the emptyDir mount is root:0 with g+rwx. `cp -a` copies
+        # files fine but then calls utimes() on the destination dir itself
+        # ("Operation not permitted" -- only the owner can set timestamps on a
+        # directory, and uid 1000 != root), which crashes the initContainer.
+        # `cp -R` preserves file modes naturally on regular files and never
+        # touches the destination dir's timestamps. Alluxio's conf/ has no
+        # scripts that rely on atime/mtime, so the lossy copy is harmless.
+        command: ["sh", "-c", "cp -R /opt/alluxio/conf/. /mnt/alluxio-conf/"]
         volumeMounts:
           - name: alluxio-conf
             mountPath: /mnt/alluxio-conf
