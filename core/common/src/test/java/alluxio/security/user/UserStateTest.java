@@ -21,13 +21,24 @@ import alluxio.security.User;
 import alluxio.security.authentication.AuthType;
 
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Set;
+import javax.security.auth.Subject;
 
 /**
  * Unit test for {@link UserState}.
  */
 public final class UserStateTest {
   private final InstancedConfiguration mConfiguration = Configuration.copyGlobal();
+
+  @Rule
+  public TemporaryFolder mFolder = new TemporaryFolder();
 
   /**
    * Tests whether we can get login user with conf in SIMPLE mode.
@@ -138,6 +149,35 @@ public final class UserStateTest {
 
     assertNotNull(loginUser);
     assertEquals(System.getProperty("user.name"), loginUser.getName());
+  }
+
+  /**
+   * Verifies that CUSTOM auth runs the CUSTOM JAAS chain -- specifically, that
+   * {@link alluxio.security.login.K8sTokenLoginModule} executes and attaches the
+   * projected ServiceAccount token to the Subject's private credentials. Without
+   * this, SaslClientHandlerPlain sends the "noPassword" sentinel and the master
+   * rejects every worker/client handshake under CUSTOM with
+   * "[invalid bearer token, unknown]".
+   */
+  @Test
+  public void getCustomLoginUserLoadsK8sToken() throws Exception {
+    File tokenFile = mFolder.newFile("k8s-token");
+    String token = "eyJhbGciOiJSUzI1NiJ9.PAYLOAD.signature";
+    Files.write(tokenFile.toPath(), token.getBytes(StandardCharsets.UTF_8));
+
+    mConfiguration.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.CUSTOM);
+    mConfiguration.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH,
+        tokenFile.getAbsolutePath());
+
+    UserState s = UserState.Factory.create(mConfiguration);
+    User loginUser = s.getUser();
+    assertNotNull(loginUser);
+
+    Subject subject = s.getSubject();
+    Set<String> credentials = subject.getPrivateCredentials(String.class);
+    assertEquals("CUSTOM login chain should attach the K8s projected token as a "
+        + "String credential on the Subject", 1, credentials.size());
+    assertEquals(token, credentials.iterator().next());
   }
 
   // TODO(dong): getKerberosLoginUserTest()

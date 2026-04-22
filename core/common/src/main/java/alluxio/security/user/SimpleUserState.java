@@ -59,12 +59,21 @@ public class SimpleUserState extends BaseUserState {
     if (mConf.isSet(PropertyKey.SECURITY_LOGIN_USERNAME)) {
       username = mConf.getString(PropertyKey.SECURITY_LOGIN_USERNAME);
     }
+    // Pick the JAAS appName that matches the configured auth type so CUSTOM callers
+    // actually get the CUSTOM login chain (which appends K8sTokenLoginModule). Passing
+    // AuthType.SIMPLE unconditionally -- as upstream does -- silently drops any
+    // CUSTOM-only module, so the projected ServiceAccount token never rides on the
+    // wire and the master rejects the SASL PLAIN bind with
+    // "[invalid bearer token, unknown]" (the kube-apiserver TokenReview error for
+    // unparseable bearer tokens). Factory above only builds SimpleUserState for
+    // SIMPLE or CUSTOM, so no other AuthType can reach this line.
+    AuthType authType = mConf.getEnum(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.class);
     try {
       // Use the class loader of User.class to construct the LoginContext. LoginContext uses this
       // class loader to dynamically instantiate login modules. This enables
       // Subject#getPrincipals to use reflection to search for User.class instances.
       LoginContext loginContext =
-          SecurityUtils.createLoginContext(AuthType.SIMPLE, mSubject, User.class.getClassLoader(),
+          SecurityUtils.createLoginContext(authType, mSubject, User.class.getClassLoader(),
               new LoginModuleConfiguration(), new AppLoginModule.AppCallbackHandler(username));
       loginContext.login();
     } catch (LoginException e) {
