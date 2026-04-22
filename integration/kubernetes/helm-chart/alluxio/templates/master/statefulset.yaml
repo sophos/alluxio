@@ -206,6 +206,20 @@ spec:
               mountPath: /opt/alluxio/logs
             - name: tmp
               mountPath: /tmp
+            # RocksDB off-heap metastore. Default
+            # alluxio.master.metastore.dir=${alluxio.work.dir}/metastore which
+            # resolves to /opt/alluxio-<ver>/metastore -- lives on the root FS
+            # and needs write access to mkdir blocks/ and inodes/ subdirs at
+            # boot. Safe as emptyDir: RocksDB state is rebuilt from the Raft
+            # journal on startup, so losing the metastore across restarts is
+            # correct behavior (journal is the source of truth). Only the
+            # alluxio-master container uses RocksDB -- job-master does not, so
+            # this overlay intentionally lives here only. Named *-overlay to
+            # avoid clashing with the opt-in `.Values.metastore` block below
+            # (which uses the bare `alluxio-metastore` name for user-configured
+            # PVC- or emptyDir-backed metastore at a custom mountPath).
+            - name: alluxio-metastore-overlay
+              mountPath: /opt/alluxio/metastore
             {{- if .Values.master.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.master.extraVolumeMounts) | indent 12 }}
             {{- end }}
@@ -340,6 +354,12 @@ spec:
         - name: alluxio-logs
           emptyDir: {}
         - name: tmp
+          emptyDir: {}
+        # Writable overlay for the master's default RocksDB metastore path.
+        # See the matching volumeMount on the alluxio-master container for why
+        # this is safe as emptyDir (journal is source of truth, metastore is
+        # rebuilt from it on restart).
+        - name: alluxio-metastore-overlay
           emptyDir: {}
         {{- if .Values.master.extraVolumes }}
 {{- include "alluxio.extraVolumes" (dict "extraVolumes" .Values.master.extraVolumes) | indent 8 }}
