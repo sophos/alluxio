@@ -92,17 +92,45 @@ public final class K8sTokenLoginModule implements LoginModule {
     }
     String token;
     try {
-      token = new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8).trim();
+      token = readTokenFromDisk(path);
     } catch (IOException e) {
       throw new LoginException(
           "Failed to read Kubernetes token at " + path + ": " + e.getMessage());
     }
-    if (token.isEmpty()) {
-      throw new LoginException("Kubernetes token at " + path + " is empty");
-    }
     mToken = token;
     LOG.debug("Loaded Kubernetes token from {} ({} chars)", path, token.length());
     return true;
+  }
+
+  /**
+   * Reads and trims a projected ServiceAccount token from disk.
+   *
+   * <p>The value the JAAS login captures here is only useful at the moment
+   * login runs: kubelet atomically swaps the projected token well before its
+   * TTL (~80% of {@code expirationSeconds}), but nothing inside Alluxio
+   * re-runs JAAS login after the pod starts. A long-lived client (Trino
+   * coordinator, Alluxio worker) will therefore keep a stale token in its
+   * {@link Subject}'s private credentials past the original TTL.
+   *
+   * <p>To fix that without changing JAAS semantics, the same file-read is
+   * exposed as a static helper so the SASL client can re-read on every
+   * channel authentication — see {@code
+   * alluxio.security.authentication.plain.SaslClientHandlerPlain} for the
+   * call site. Keeping the helper here means the login-time and
+   * refresh-at-auth-time paths share one definition of "what a valid
+   * on-disk token looks like" (non-empty, trimmed of trailing whitespace).
+   *
+   * @param path filesystem path to the projected token (must be non-null,
+   *             non-empty; callers are expected to short-circuit if unset)
+   * @return the trimmed token contents, guaranteed non-empty
+   * @throws IOException if the file cannot be read or is empty after trim
+   */
+  public static String readTokenFromDisk(String path) throws IOException {
+    String token = new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8).trim();
+    if (token.isEmpty()) {
+      throw new IOException("Kubernetes token at " + path + " is empty");
+    }
+    return token;
   }
 
   @Override

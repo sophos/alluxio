@@ -25,6 +25,7 @@ import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Collections;
@@ -144,5 +145,44 @@ public final class K8sTokenLoginModuleTest {
     mThrown.expect(LoginException.class);
     mThrown.expectMessage("read-only");
     module.commit();
+  }
+
+  @Test
+  public void readTokenFromDiskTrimsTrailingWhitespace() throws Exception {
+    File tokenFile = mTmp.newFile("token");
+    Files.write(tokenFile.toPath(),
+        "eyJhbGciOiJSUzI1NiJ9.payload.signature\n\n".getBytes(StandardCharsets.UTF_8));
+
+    assertEquals("eyJhbGciOiJSUzI1NiJ9.payload.signature",
+        K8sTokenLoginModule.readTokenFromDisk(tokenFile.getAbsolutePath()));
+  }
+
+  @Test
+  public void readTokenFromDiskReflectsPostWriteUpdates() throws Exception {
+    // Regression guard: SaslClientHandlerPlain depends on readTokenFromDisk
+    // being a pure re-read of the file (no caching), so that kubelet's
+    // atomic swap of the projected token is visible to every later SASL
+    // bind. Without this, long-lived clients (Trino, Alluxio workers) ride
+    // an expired credential past the 1h SA token TTL and every channel
+    // re-auth fails with "service account token has expired" — the failure
+    // mode this whole fix was cut to address.
+    File tokenFile = mTmp.newFile("token");
+    Files.write(tokenFile.toPath(), "old-token".getBytes(StandardCharsets.UTF_8));
+
+    assertEquals("old-token",
+        K8sTokenLoginModule.readTokenFromDisk(tokenFile.getAbsolutePath()));
+
+    Files.write(tokenFile.toPath(), "fresh-token".getBytes(StandardCharsets.UTF_8));
+    assertEquals("fresh-token",
+        K8sTokenLoginModule.readTokenFromDisk(tokenFile.getAbsolutePath()));
+  }
+
+  @Test
+  public void readTokenFromDiskRejectsEmptyFile() throws Exception {
+    File empty = mTmp.newFile("empty");
+
+    mThrown.expect(IOException.class);
+    mThrown.expectMessage("is empty");
+    K8sTokenLoginModule.readTokenFromDisk(empty.getAbsolutePath());
   }
 }

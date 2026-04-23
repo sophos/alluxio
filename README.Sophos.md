@@ -29,6 +29,13 @@ The main branch of this fork is `sophos/main`. It was forked from the upstream
   projected ServiceAccount token reaches the Subject before the SUFFICIENT
   `AppLoginModule` short-circuits the chain
   Branch feature: `sophos/release-2.9.6-acl`
+- SASL client re-reads the projected ServiceAccount token from disk on
+  every channel authentication (kubelet atomically rotates the token
+  at ~80% of its TTL, but JAAS login runs once per process; without
+  this, long-lived clients keep a stale copy in their Subject and
+  every reconnect after the original TTL fails with
+  "UNAUTHENTICATED: service account token has expired")
+  Branch feature: `sophos/release-2.9.6-acl`
 - Helm chart: `alluxio.extraVolumes` / `alluxio.extraVolumeMounts` helpers
   extended to accept `projected` volumes (required by the TokenReview
   provider, which only trusts audience-bound projected tokens)
