@@ -12,34 +12,26 @@ The main branch of this fork is `sophos/main`. It was forked from the upstream
 - Support for Docker registry proxy
   Commit: `f763dfc308df906c0b5f82d89f64be67127eae11`
 - ACL inheritance preservation during metadata sync
-  Branch feature: `sophos/release-2.9.6-acl`
 - Recursive `setfacl -R` silently skips default ACL entries on files
-  Branch feature: `sophos/release-2.9.6-acl`
 - Per-side `updateMask` gate: explicit default mask no longer suppresses
   access-mask auto-recompute (and vice versa)
-  Branch feature: `sophos/release-2.9.6-acl`
 - Kubernetes TokenReview-based custom authentication provider
-  Branch feature: `sophos/release-2.9.6-acl`
 - Internal Alluxio service account pass-through in the TokenReview provider,
   so Alluxio's own master↔master and worker↔master RPCs authenticate under
   the same `CUSTOM` auth mode as external tenants
-  Branch feature: `sophos/release-2.9.6-acl`
 - CUSTOM JAAS login chain builds the actual CUSTOM module list (not SIMPLE),
   and reorders `K8sTokenLoginModule` ahead of `AppLoginModule` so the
   projected ServiceAccount token reaches the Subject before the SUFFICIENT
   `AppLoginModule` short-circuits the chain
-  Branch feature: `sophos/release-2.9.6-acl`
 - SASL client re-reads the projected ServiceAccount token from disk on
   every channel authentication (kubelet atomically rotates the token
   at ~80% of its TTL, but JAAS login runs once per process; without
   this, long-lived clients keep a stale copy in their Subject and
   every reconnect after the original TTL fails with
   "UNAUTHENTICATED: service account token has expired")
-  Branch feature: `sophos/release-2.9.6-acl`
 - Helm chart: `alluxio.extraVolumes` / `alluxio.extraVolumeMounts` helpers
   extended to accept `projected` volumes (required by the TokenReview
   provider, which only trusts audience-bound projected tokens)
-  Branch feature: `sophos/release-2.9.6-acl`
 
 ## ACL Inheritance On Metadata Sync
 
