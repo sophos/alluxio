@@ -463,13 +463,43 @@ now:
 
 1. Declare a `seed-alluxio-conf` initContainer that runs the Alluxio image
    itself and copies `/opt/alluxio/conf/.` into a shared emptyDir
-   (`alluxio-conf`) before the main containers start.
-2. Mount three emptyDir volumes into every application container:
+   (`alluxio-conf`) before the main containers start. The copy uses `cp -R`
+   rather than `cp -a`: the initContainer runs as `runAsUser: 1000` but the
+   emptyDir mount point is root-owned by default, and `cp -a` preserves
+   timestamps by `utimes()`-ing the destination dir, which fails with
+   `Operation not permitted` for a non-root user on a root-owned dir. `cp -R`
+   preserves file modes but does not touch the mount-point timestamps, so it
+   succeeds without requiring `fsGroup` gymnastics; the Alluxio entrypoint
+   does not rely on mtime/atime of `conf/`, so the lossy copy is harmless.
+2. Mount writable overlays into every application container:
    - `alluxio-conf` at `/opt/alluxio/conf` (seeded with the baked
      configuration, now writable),
    - `alluxio-logs` at `/opt/alluxio/logs`,
    - `tmp` at `/tmp`.
-3. Register those emptyDirs at the pod level so they can be shared across
+3. Master-only overlays (on the `alluxio-master` and `alluxio-job-master`
+   containers inside the master StatefulSet pod):
+   - `alluxio-metastore-overlay` at `/opt/alluxio/metastore` on the
+     `alluxio-master` container -- the RocksDB off-heap metastore
+     (`blocks/`, `inodes/`). Default
+     `alluxio.master.metastore.dir=${alluxio.work.dir}/metastore` resolves
+     onto the read-only rootfs; providing this emptyDir lets RocksDB
+     `mkdir` its subdirs at boot. Safe as ephemeral: RocksDB state is
+     rebuilt from the Raft journal on startup, which is the source of
+     truth. Only the `alluxio-master` container opens RocksDB --
+     `alluxio-job-master` does not, so this overlay deliberately lives
+     there only.
+   - `alluxio-job-journal-overlay` at `/journal` on the
+     `alluxio-job-master` container -- the job-master runs its own
+     independent raft cluster whose journal lives at the default
+     `alluxio.job.master.journal.folder=/journal`. Upstream treats that as
+     a plain writable dir on the container rootfs (ephemeral, rebuilt on
+     every pod restart; job-master tracks in-flight jobs only, which are
+     re-queued by clients). With `readOnlyRootFilesystem: true`
+     `RaftJournalSystem.format()` hits `AccessDeniedException` on
+     `mkdir /journal/JobJournal`; a dedicated emptyDir preserves the
+     upstream semantic. Distinct name from the `alluxio-journal` PVC used
+     by `alluxio-master` to avoid confusion.
+4. Register those emptyDirs at the pod level so they can be shared across
    the two containers that live in each master StatefulSet pod / each
    worker DaemonSet pod.
 

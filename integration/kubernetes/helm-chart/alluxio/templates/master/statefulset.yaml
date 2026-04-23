@@ -323,6 +323,21 @@ spec:
               mountPath: /opt/alluxio/logs
             - name: tmp
               mountPath: /tmp
+            # Job-master's raft journal. Upstream intentionally does NOT mount
+            # the alluxio-journal PVC here -- that PVC is exclusive to the
+            # alluxio-master container's FS raft journal (/journal/raft/). The
+            # job-master runs its own independent raft cluster whose journal
+            # lives at the default alluxio.job.master.journal.folder=/journal
+            # (resolved from alluxio.work.dir), which upstream expects to be a
+            # plain writable dir on the container's rootfs (ephemeral,
+            # rebuilt on every pod restart -- job state tracks in-flight jobs
+            # only, which are re-queued by clients after a restart). With
+            # readOnlyRootFilesystem: true, RaftJournalSystem.format() hits
+            # AccessDeniedException on mkdir /journal/JobJournal, so we need a
+            # dedicated writable overlay here. Distinct name from
+            # alluxio-journal to avoid any confusion with the master PVC.
+            - name: alluxio-job-journal-overlay
+              mountPath: /journal
           {{- if .Values.master.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.master.extraVolumeMounts) | indent 12 }}
           {{- end }}
@@ -360,6 +375,14 @@ spec:
         # this is safe as emptyDir (journal is source of truth, metastore is
         # rebuilt from it on restart).
         - name: alluxio-metastore-overlay
+          emptyDir: {}
+        # Writable overlay for the job-master's default /journal path. See the
+        # matching volumeMount on alluxio-job-master for why this is safe as
+        # emptyDir (job-master journal tracks in-flight jobs only, rebuilt on
+        # every pod restart -- upstream already treats it as ephemeral on the
+        # container rootfs, we just need an explicit writable backing under
+        # readOnlyRootFilesystem).
+        - name: alluxio-job-journal-overlay
           emptyDir: {}
         {{- if .Values.master.extraVolumes }}
 {{- include "alluxio.extraVolumes" (dict "extraVolumes" .Values.master.extraVolumes) | indent 8 }}
