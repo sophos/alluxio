@@ -24,6 +24,11 @@ The main branch of this fork is `sophos/main`. It was forked from the upstream
   so Alluxio's own master↔master and worker↔master RPCs authenticate under
   the same `CUSTOM` auth mode as external tenants
   Branch feature: `sophos/release-2.9.6-acl`
+- CUSTOM JAAS login chain builds the actual CUSTOM module list (not SIMPLE),
+  and reorders `K8sTokenLoginModule` ahead of `AppLoginModule` so the
+  projected ServiceAccount token reaches the Subject before the SUFFICIENT
+  `AppLoginModule` short-circuits the chain
+  Branch feature: `sophos/release-2.9.6-acl`
 - Helm chart: `alluxio.extraVolumes` / `alluxio.extraVolumeMounts` helpers
   extended to accept `projected` volumes (required by the TokenReview
   provider, which only trusts audience-bound projected tokens)
@@ -372,6 +377,44 @@ volumes:
    in the SASL password field.
 4. Set `alluxio.security.authentication.type=CUSTOM`.
 5. Watch authentication failures and TokenReview volume.
+
+### Client-side JAAS plumbing fixes
+
+The token is loaded onto the `Subject` by `K8sTokenLoginModule`, which reads
+`alluxio.security.authentication.k8s.client.token.path` and stashes the file
+contents as a `String` private credential. `SaslClientHandlerPlain` then
+forwards that credential as the SASL PLAIN password, where the master-side
+`K8sTokenAuthenticationProvider` picks it up and validates via TokenReview.
+
+Two bugs in the upstream client login flow had to be fixed here before that
+actually worked end-to-end:
+
+1. `SimpleUserState.login()` was constructing the `LoginContext` with
+   `AuthType.SIMPLE` hardcoded, even when the process was configured with
+   `AuthType.CUSTOM`. JAAS looks up the module chain by appName, so passing
+   `SIMPLE` selected the `SIMPLE` chain — which does not contain
+   `K8sTokenLoginModule`. Fixed by reading the configured auth type and
+   passing it to `SecurityUtils.createLoginContext` so `CUSTOM` callers
+   actually get the `CUSTOM` chain.
+
+2. The `CUSTOM` chain in `LoginModuleConfiguration` appended
+   `K8sTokenLoginModule` *after* `AppLoginModule`. `AppLoginModule` is marked
+   `SUFFICIENT` and succeeds whenever a login username is configured (which it
+   always is for internal Alluxio pods via `alluxio.security.login.username`),
+   and JAAS specifies that once a `SUFFICIENT` module's `login()` succeeds the
+   LoginContext short-circuits and skips every subsequent module's `login()`
+   entirely. The result: `K8sTokenLoginModule.login()` never ran,
+   `commit()` never ran, no token landed on the Subject, and
+   `SaslClientHandlerPlain` sent its `"noPassword"` placeholder — which
+   kube-apiserver TokenReview rejects as
+   `[invalid bearer token, unknown]`. Fixed by reordering the `CUSTOM`
+   chain so `K8S_TOKEN_LOGIN` runs first; its `OPTIONAL` flag means its
+   return value does not steer the chain, so `AppLoginModule` still
+   short-circuits as before but the token is already loaded by then.
+   Regression guarded by
+   `UserStateTest.getCustomLoginUserLoadsK8sTokenEvenWhenUsernameProvided`,
+   which exercises the production shape (username + token path both set)
+   and asserts the token is attached to the Subject.
 
 ## Alluxio Helm Chart: Projected Volume Support
 

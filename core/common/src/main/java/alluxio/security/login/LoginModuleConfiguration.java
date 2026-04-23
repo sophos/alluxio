@@ -70,13 +70,25 @@ public final class LoginModuleConfiguration extends Configuration {
       new AppConfigurationEntry[] {APP_LOGIN, OS_SPECIFIC_LOGIN, ALLUXIO_LOGIN};
 
   /**
-   * In the {@link AuthType#CUSTOM} mode, the module chain is {@link #SIMPLE} with
-   * {@link K8sTokenLoginModule} appended. The K8s token module is OPTIONAL so a client without a
+   * In the {@link AuthType#CUSTOM} mode, the module chain is {@link #SIMPLE} prefixed with
+   * {@link K8sTokenLoginModule}. The K8s token module is OPTIONAL so a client without a
    * configured token path behaves identically to SIMPLE; when the path is set, the loaded token
    * rides along as a private credential on the Subject.
+   *
+   * <p>K8S must come FIRST, not last. {@link #APP_LOGIN} is {@code SUFFICIENT}: per JAAS, once a
+   * SUFFICIENT module's {@code login()} succeeds the LoginContext short-circuits and skips every
+   * subsequent module's {@code login()}. Alluxio always constructs the LoginContext with an
+   * application-provided username via {@code AppCallbackHandler}, so {@code APP_LOGIN} invariably
+   * succeeds -- which means any module appended after it never runs, its token never lands on the
+   * Subject, and {@code SaslClientHandlerPlain} falls back to the {@code "noPassword"} placeholder.
+   * The master then POSTs {@code spec.token="noPassword"} to kube-apiserver's TokenReview, which
+   * rejects it as {@code "[invalid bearer token, unknown]"}. Putting K8S at index 0 lets it run
+   * unconditionally (its OPTIONAL flag means its return value doesn't steer the chain), so by the
+   * time APP_LOGIN short-circuits the token is already loaded in module state and gets committed
+   * onto the Subject alongside APP_LOGIN's user principal.
    */
   private static final AppConfigurationEntry[] CUSTOM =
-      new AppConfigurationEntry[] {APP_LOGIN, OS_SPECIFIC_LOGIN, ALLUXIO_LOGIN, K8S_TOKEN_LOGIN};
+      new AppConfigurationEntry[] {K8S_TOKEN_LOGIN, APP_LOGIN, OS_SPECIFIC_LOGIN, ALLUXIO_LOGIN};
 
   /**
    * Constructs a new {@link LoginModuleConfiguration}.

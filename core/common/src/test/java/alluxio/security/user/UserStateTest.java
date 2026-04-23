@@ -158,6 +158,13 @@ public final class UserStateTest {
    * this, SaslClientHandlerPlain sends the "noPassword" sentinel and the master
    * rejects every worker/client handshake under CUSTOM with
    * "[invalid bearer token, unknown]".
+   *
+   * <p>Token path is written to {@link Configuration#global()} (not the local
+   * {@link #mConfiguration}) because JAAS instantiates K8sTokenLoginModule via
+   * its no-arg constructor, which snapshots {@code Configuration.global()} at
+   * module construction time -- matching how the property actually lands in
+   * prod (JVM {@code -D} system properties are picked up by
+   * {@code Configuration.reloadProperties()} into the global singleton).
    */
   @Test
   public void getCustomLoginUserLoadsK8sToken() throws Exception {
@@ -166,18 +173,60 @@ public final class UserStateTest {
     Files.write(tokenFile.toPath(), token.getBytes(StandardCharsets.UTF_8));
 
     mConfiguration.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.CUSTOM);
-    mConfiguration.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH,
+    Configuration.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH,
         tokenFile.getAbsolutePath());
+    try {
+      UserState s = UserState.Factory.create(mConfiguration);
+      User loginUser = s.getUser();
+      assertNotNull(loginUser);
 
-    UserState s = UserState.Factory.create(mConfiguration);
-    User loginUser = s.getUser();
-    assertNotNull(loginUser);
+      Subject subject = s.getSubject();
+      Set<String> credentials = subject.getPrivateCredentials(String.class);
+      assertEquals("CUSTOM login chain should attach the K8s projected token as a "
+          + "String credential on the Subject", 1, credentials.size());
+      assertEquals(token, credentials.iterator().next());
+    } finally {
+      Configuration.unset(PropertyKey.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH);
+    }
+  }
 
-    Subject subject = s.getSubject();
-    Set<String> credentials = subject.getPrivateCredentials(String.class);
-    assertEquals("CUSTOM login chain should attach the K8s projected token as a "
-        + "String credential on the Subject", 1, credentials.size());
-    assertEquals(token, credentials.iterator().next());
+  /**
+   * Regression test for the production shape: CUSTOM auth with BOTH a
+   * configured login username AND a K8s token path set. AppLoginModule is
+   * SUFFICIENT, so once it succeeds (any non-empty username does) JAAS
+   * short-circuits and skips every subsequent module's login(). If
+   * K8sTokenLoginModule is appended AFTER AppLoginModule it never runs, the
+   * token never lands on the Subject, and SaslClientHandlerPlain sends
+   * "noPassword" -- which the master-side K8sTokenAuthenticationProvider
+   * forwards to kube-apiserver's TokenReview, which rejects it as
+   * "[invalid bearer token, unknown]". Guards the CUSTOM chain order so K8S
+   * runs before APP and the token is committed alongside the user principal.
+   */
+  @Test
+  public void getCustomLoginUserLoadsK8sTokenEvenWhenUsernameProvided() throws Exception {
+    File tokenFile = mFolder.newFile("k8s-token");
+    String token = "eyJhbGciOiJSUzI1NiJ9.PAYLOAD.signature";
+    Files.write(tokenFile.toPath(), token.getBytes(StandardCharsets.UTF_8));
+
+    mConfiguration.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.CUSTOM);
+    mConfiguration.set(PropertyKey.SECURITY_LOGIN_USERNAME, "alluxio");
+    Configuration.set(PropertyKey.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH,
+        tokenFile.getAbsolutePath());
+    try {
+      UserState s = UserState.Factory.create(mConfiguration);
+      User loginUser = s.getUser();
+      assertNotNull(loginUser);
+      assertEquals("alluxio", loginUser.getName());
+
+      Subject subject = s.getSubject();
+      Set<String> credentials = subject.getPrivateCredentials(String.class);
+      assertEquals("CUSTOM chain with username + token path must still attach the "
+          + "K8s projected token (K8S_TOKEN_LOGIN must precede APP_LOGIN in the chain)",
+          1, credentials.size());
+      assertEquals(token, credentials.iterator().next());
+    } finally {
+      Configuration.unset(PropertyKey.SECURITY_AUTHENTICATION_K8S_CLIENT_TOKEN_PATH);
+    }
   }
 
   // TODO(dong): getKerberosLoginUserTest()
