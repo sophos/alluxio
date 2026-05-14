@@ -285,6 +285,13 @@ worker:
   hostNetwork: false
   shareProcessNamespace: false
   extraContainers: []
+  # Sophos fork (CSA-21950): full v1.Container specs rendered into the
+  # worker pod's initContainers list, AFTER the chart's own
+  # seed-alluxio-conf step. Useful for one-shot setup like chown'ing a
+  # hostPath tier directory so the non-root worker can write into it.
+  # `tpl` is applied to each entry so you can reference chart values
+  # (e.g. `{{ .Values.image }}:{{ .Values.imageTag }}`) inline.
+  extraInitContainers: []
   extraVolumeMounts: []
   extraVolumes: []
   # dnsPolicy will be ClusterFirstWithHostNet if hostNetwork: true

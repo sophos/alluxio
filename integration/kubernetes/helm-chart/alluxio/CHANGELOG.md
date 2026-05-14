@@ -323,3 +323,12 @@
 
 0.6.54
 - Update CSI driver and provisioner image
+
+0.6.55
+
+- Sophos fork (CSA-21950): add `worker.extraInitContainers` to inject
+  user-supplied one-shot initContainers into the worker daemonset (e.g.
+  chown a hostPath tier directory for the non-root worker). Renders
+  AFTER the seed-alluxio-conf step so callers boot against a writable
+  /opt/alluxio/conf. Entries are `tpl`-evaluated, so callers can
+  reference chart values like `{{ .Values.image }}` inside their spec.

@@ -104,6 +104,15 @@ spec:
         volumeMounts:
           - name: alluxio-conf
             mountPath: /mnt/alluxio-conf
+      # Sophos fork (CSA-21950): user-supplied initContainers run AFTER
+      # seed-alluxio-conf -- ordering matters because the seed step is what
+      # makes /opt/alluxio/conf writable for any subsequent setup that
+      # might want to drop files there. Keep this block last in
+      # initContainers: so the worker container always boots against a
+      # fully-prepared filesystem.
+      {{- if .Values.worker.extraInitContainers }}
+{{ include "alluxio.extraInitContainers" (dict "extraInitContainers" .Values.worker.extraInitContainers "ctx" $) | indent 6 }}
+      {{- end }}
       containers:
         {{- if .Values.worker.extraContainers }}
 {{ include "alluxio.extraContainers" (dict "extraContainers" .Values.worker.extraContainers) | indent 8 }}

@@ -567,3 +567,28 @@ Extra container specs that can be added to a pod
   {{- end }}
   {{- end }}
 {{- end -}}
+
+{{/*
+Sophos fork (CSA-21950): extra initContainers that can be added to a pod.
+
+Deliberately NOT matching the field-by-field enumeration style used by
+`alluxio.extraContainers` above. InitContainers are typically one-shot
+setup tasks (chown a hostPath, prefetch an artifact, run a migration)
+whose specs need access to arbitrary container fields the upstream
+helper doesn't model -- securityContext.runAsNonRoot, securityContext
+.capabilities, lifecycle, workingDir, full shell-glued command strings,
+etc. A `tpl + toYaml` passthrough gives callers the full v1.Container
+schema without forcing the chart to grow a new branch every time
+someone wants a field we didn't predict.
+
+`tpl` is evaluated against the chart's root context ($), so callers can
+reference values like `{{ .Values.image }}:{{ .Values.imageTag }}` from
+inside their initContainer spec to share the alluxio image without
+repeating the pin.
+
+@param .extraInitContainers   List of full v1.Container specs.
+@param .ctx                   Root chart context (for `tpl` evaluation).
+*/}}
+{{- define "alluxio.extraInitContainers" -}}
+{{- tpl (toYaml .extraInitContainers) .ctx }}
+{{- end -}}
