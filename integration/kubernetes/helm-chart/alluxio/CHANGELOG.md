@@ -332,3 +332,11 @@
   AFTER the seed-alluxio-conf step so callers boot against a writable
   /opt/alluxio/conf. Entries are `tpl`-evaluated, so callers can
   reference chart values like `{{ .Values.image }}` inside their spec.
+
+0.6.56
+
+- Sophos fork (CSA-21950): add `master.topologySpreadConstraints`
+  passthrough on the master statefulset, so callers can spread an HA
+  Raft master quorum across distinct nodes (or any other topology key)
+  for correlated-failure protection. Renders right after tolerations.
+  Raw v1.TopologySpreadConstraint list, no field enumeration.

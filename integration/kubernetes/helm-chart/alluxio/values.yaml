@@ -106,6 +106,15 @@ master:
   extraVolumeMounts: []
   extraVolumes: []
   extraServicePorts: []
+  # Sophos fork (CSA-21950): raw v1.TopologySpreadConstraint list rendered
+  # into the master statefulset pod spec. Use with maxSkew + a labelSelector
+  # matching `app: <chart-name>, role: alluxio-master` (the labels the chart
+  # already attaches to master pods) to spread an HA Raft master quorum
+  # across distinct nodes for correlated-failure protection. Pair with
+  # whenUnsatisfiable: ScheduleAnyway for opportunistic / cost-free spread,
+  # or DoNotSchedule for guaranteed spread (autoscaler will provision an
+  # extra node to satisfy it).
+  topologySpreadConstraints: []
   # dnsPolicy will be ClusterFirstWithHostNet if hostNetwork: true
   # and ClusterFirst if hostNetwork: false
   # You can specify dnsPolicy here to override this inference
