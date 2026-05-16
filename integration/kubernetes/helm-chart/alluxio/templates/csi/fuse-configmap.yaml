@@ -25,6 +25,9 @@ metadata:
     chart: {{ $chart }}
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 data:
   alluxio-csi-fuse-config: |
     kind: Pod
@@ -35,6 +38,9 @@ data:
         name: {{ $fullName }}-fuse
         app: {{ $name }}
         role: alluxio-fuse
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       nodeName:
       hostNetwork: {{ .Values.fuse.hostNetwork }}

@@ -24,6 +24,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-logserver
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: 1
   {{ with .Values.logserver.strategy -}}
@@ -44,6 +47,9 @@ spec:
         release: {{ .Release.Name }}
         heritage: {{ .Release.Service }}
         role: alluxio-logserver
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       tolerations:
       {{- if .Values.logserver.tolerations }}

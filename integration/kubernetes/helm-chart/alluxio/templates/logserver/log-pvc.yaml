@@ -22,6 +22,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-logserver
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   volumeMode: Filesystem
   resources:

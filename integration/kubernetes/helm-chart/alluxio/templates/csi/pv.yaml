@@ -16,6 +16,9 @@ metadata:
   name: alluxio-pv
   labels:
     name: alluxio-pv
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   accessModes:
   {{ toYaml .Values.csi.accessModes }}

@@ -12,6 +12,14 @@
 # This should not be modified in the usual case.
 fullnameOverride: alluxio
 
+# Caller-supplied opaque map of labels applied to every resource that
+# already emits metadata.labels AND to every pod template that already
+# emits labels. Empty/absent map = nothing added (chart behavior unchanged).
+# Selectors (matchLabels) and resources with no existing labels block are
+# NOT touched — see templates/_helpers.tpl `alluxio.commonLabels` for the
+# rationale.
+commonLabels: {}
+
 
 ## Common ##
 

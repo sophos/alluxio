@@ -31,6 +31,35 @@ Create chart name and version as used by the chart label.
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/*
+Caller-supplied opaque map of labels applied to every resource that already
+emits a metadata.labels block AND to every pod template that already emits
+labels. Empty/absent .Values.commonLabels → emits nothing (call sites
+`with`-gate the output so the labels stanza stays clean).
+
+Deliberately NOT applied to:
+  - selector.matchLabels / spec.selector.matchLabels
+    Selectors are immutable on workloads (Deployment/StatefulSet/DaemonSet)
+    and are validated as a strict-match subset of pod template labels —
+    you can add labels to a pod template that aren't in the selector
+    (safe), but not the inverse. Keeping the selector key set fixed at
+    {app, role, name, …} preserves rollout safety on upgrade.
+  - resources that ship without any metadata.labels today (a few CSI
+    helpers: csi/driver, csi/storage-class, csi/pvc*, csi/controller-rbac).
+    Intentionally additive — wiring commonLabels into them would silently
+    introduce new label keys on upgrade for any deployment that's been
+    relying on their no-labels surface.
+
+Caller decides what the map contains (platform tags, datadog service,
+team identifiers, etc.) — the chart treats it as a passthrough and adds
+no auto-derivation, validation, or default keys.
+*/}}
+{{- define "alluxio.commonLabels" -}}
+{{- with .Values.commonLabels -}}
+{{ toYaml . }}
+{{- end -}}
+{{- end -}}
+
 {{- define "alluxio.jobWorker.resources" -}}
 resources:
   limits:

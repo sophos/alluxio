@@ -205,6 +205,9 @@ metadata:
     chart: {{ $chart }}
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 data:
   ALLUXIO_JAVA_OPTS: |-
     {{- /* Format ALLUXIO_JAVA_OPTS list to one line */}}

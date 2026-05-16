@@ -33,6 +33,9 @@ metadata:
     release: {{ $release.Name }}
     heritage: {{ $release.Service }}
     role: alluxio-master
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   ports:
     - port: {{ int .Values.master.ports.rpc }}

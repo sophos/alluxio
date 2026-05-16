@@ -340,3 +340,17 @@
   Raft master quorum across distinct nodes (or any other topology key)
   for correlated-failure protection. Renders right after tolerations.
   Raw v1.TopologySpreadConstraint list, no field enumeration.
+
+0.6.57
+
+- Sophos fork (CSA-21950): add `commonLabels` passthrough. Caller-supplied
+  opaque map of labels appended to every resource's `metadata.labels` and
+  every pod template's `spec.template.metadata.labels` across the chart
+  (master, worker, fuse, proxy, logserver, csi controller/nodeplugin,
+  config CMs, PVCs, the CSI fuse-config CM's embedded pod spec). Selectors
+  (`matchLabels`) and resources that ship without an existing `labels:`
+  block (csi/driver, csi/storage-class, csi/pvc*, csi/controller-rbac)
+  are intentionally NOT touched — selectors are immutable on workloads,
+  and the no-labels surface stays additive to avoid silently introducing
+  new label keys on upgrade. Empty map → no behavior change. Default
+  `commonLabels: {}` in values.yaml.
