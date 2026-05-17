@@ -202,8 +202,22 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 			"bin/alluxio-stop.sh",
 			"bin/alluxio-workers.sh",
 			"bin/launch-process",
-			fmt.Sprintf("client/build/alluxio-%v-hadoop2-client.jar", version),
-			fmt.Sprintf("client/build/alluxio-%v-hadoop3-client.jar", version),
+			// Sophos fork: client/build/alluxio-<ver>-hadoop{2,3}-client.jar
+			// are the maven-shade-plugin uber-jars built by shaded/client/
+			// and shaded/client-hadoop3/.  They are produced for external
+			// consumers (Spark / Presto / Hive / EMR / Dataproc) that
+			// extract this tarball on a host and run the Alluxio CLI client
+			// out of /opt/alluxio/client/.  In the Sophos Central K8s
+			// deployment these jars are dead weight: nothing in
+			// libexec/alluxio-config.sh's ALLUXIO_{SERVER,CLIENT}_CLASSPATH
+			// references them, and the downstream Trino image
+			// (cld.data-containers.trino-images) consumes the separate
+			// alluxio-<ver>-client-libs.tar.gz sidecar instead, explicitly
+			// to avoid the shaded-classpath conflicts that these uber-jars
+			// would introduce.  Dropping them saves ~80 MB and clears
+			// every "duplicate hadoop transitive" reading the Prisma SBOM
+			// flagged on the previous build (protobuf-java 3.19.6 +
+			// zookeeper 3.8.4 hits inside the hadoop3-client jar).
 			"conf/rocks-inode-bloom.ini.template",
 			"conf/rocks-block-bloom.ini.template",
 			"conf/rocks-inode.ini.template",
@@ -246,12 +260,10 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 		run(fmt.Sprintf("adding %v", path), "cp", path, filepath.Join(dstPath, path))
 	}
 
-	if !fuse {
-		run("create symlink for client jar", "ln", "-s",
-			fmt.Sprintf("build/alluxio-%v-hadoop2-client.jar", version),
-			filepath.Join(dstPath, fmt.Sprintf("client/alluxio-%v-client.jar", version)),
-		)
-	}
+	// Sophos fork: skip the `client/alluxio-<ver>-client.jar` symlink that
+	// upstream creates as a default-name pointer to the hadoop2 fat-client
+	// jar.  We don't ship the hadoop2/hadoop3 fat-clients (see pathsToCopy
+	// above for the rationale), so the symlink target wouldn't exist.
 
 	modulesToAdd := map[string]module{}
 	if fuse {
@@ -345,14 +357,26 @@ func generateTarball(opts *GenerateTarballOpts) error {
 
 	toCreateDirs := []string{"logs", "lib", "bin"}
 	if !opts.Fuse {
-		// Sophos fork: integration/fuse/ is not created -- the FUSE jar move
-		// below is intentionally skipped because helm/values.yaml sets
-		// fuse.enabled=false (and CSI is also disabled), so the fuse uber-jar
-		// would be dead weight in the runtime image while contributing
-		// ~half of the image's reported high-severity CVE surface (Apache
-		// Ratis 2.4.1's shaded netty 4.1.77, jetty/zookeeper transitives
-		// bundled by maven-shade-plugin into the fuse jar).
-		toCreateDirs = append(toCreateDirs, "assembly", "client", "integration/kubernetes", "logs/user")
+		// Sophos fork: two upstream-default top-level dirs are intentionally
+		// not created in the server tarball:
+		//   * `integration/fuse/` -- helm/values.yaml sets fuse.enabled=false
+		//     (and the CSI driver is also disabled), so the FUSE uber-jar
+		//     and its launcher script are not packaged below.  That alone
+		//     dropped ~half of the image's reported high-severity CVE
+		//     surface (Apache Ratis 2.4.1's shaded netty 4.1.77, jetty/
+		//     zookeeper transitives bundled by maven-shade-plugin into
+		//     alluxio-fuse-<ver>.jar).
+		//   * `client/` -- the maven-shade-plugin fat-client jars built by
+		//     shaded/client/ and shaded/client-hadoop3/ are not packaged
+		//     either.  They exist for external Alluxio CLI / Spark / Presto
+		//     consumers that extract the tarball; the Sophos K8s deployment
+		//     never loads them (the alluxio master/worker JVMs use
+		//     assembly/alluxio-{server,client}-<ver>.jar instead, and the
+		//     downstream Trino image pulls a separate
+		//     alluxio-<ver>-client-libs.tar.gz sidecar to avoid shaded-
+		//     classpath conflicts).  See the pathsToCopy block in
+		//     addAdditionalFiles for the per-jar rationale.
+		toCreateDirs = append(toCreateDirs, "assembly", "integration/kubernetes", "logs/user")
 	}
 	for _, dir := range toCreateDirs {
 		mkdir(filepath.Join(dstPath, dir))
