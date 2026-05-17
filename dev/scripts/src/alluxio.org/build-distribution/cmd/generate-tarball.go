@@ -222,7 +222,10 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 			"integration/docker/Dockerfile",
 			"integration/docker/Dockerfile-dev",
 			"integration/docker/entrypoint.sh",
-			"integration/fuse/bin/alluxio-fuse",
+			// Sophos fork: integration/fuse/bin/alluxio-fuse is the launcher
+			// shell wrapper for the FUSE uber-jar; both are intentionally
+			// stripped from the runtime tarball (see the FUSE block above
+			// near `toCreateDirs` for the full rationale).
 			"integration/metrics/docker-compose-master.yaml",
 			"integration/metrics/docker-compose-worker.yaml",
 			"integration/metrics/otel-agent-config.yaml",
@@ -342,7 +345,14 @@ func generateTarball(opts *GenerateTarballOpts) error {
 
 	toCreateDirs := []string{"logs", "lib", "bin"}
 	if !opts.Fuse {
-		toCreateDirs = append(toCreateDirs, "assembly", "client", "integration/fuse", "integration/kubernetes", "logs/user")
+		// Sophos fork: integration/fuse/ is not created -- the FUSE jar move
+		// below is intentionally skipped because helm/values.yaml sets
+		// fuse.enabled=false (and CSI is also disabled), so the fuse uber-jar
+		// would be dead weight in the runtime image while contributing
+		// ~half of the image's reported high-severity CVE surface (Apache
+		// Ratis 2.4.1's shaded netty 4.1.77, jetty/zookeeper transitives
+		// bundled by maven-shade-plugin into the fuse jar).
+		toCreateDirs = append(toCreateDirs, "assembly", "client", "integration/kubernetes", "logs/user")
 	}
 	for _, dir := range toCreateDirs {
 		mkdir(filepath.Join(dstPath, dir))
@@ -361,7 +371,11 @@ func generateTarball(opts *GenerateTarballOpts) error {
 		}
 		run("adding Alluxio client assembly jar", "mv", fmt.Sprintf("assembly/client/target/alluxio-assembly-client-%v-jar-with-dependencies.jar", version), filepath.Join(dstPath, "assembly", fmt.Sprintf("alluxio-client-%v.jar", version)))
 		run("adding Alluxio server assembly jar", "mv", fmt.Sprintf("assembly/server/target/alluxio-assembly-server-%v-jar-with-dependencies.jar", version), filepath.Join(dstPath, "assembly", fmt.Sprintf("alluxio-server-%v.jar", version)))
-		run("adding Alluxio FUSE jar", "mv", fmt.Sprintf("integration/fuse/target/alluxio-integration-fuse-%v-jar-with-dependencies.jar", version), filepath.Join(dstPath, "integration", "fuse", fmt.Sprintf("alluxio-fuse-%v.jar", version)))
+		// Sophos fork: FUSE is disabled in the helm chart so the fuse uber-jar
+		// is intentionally not packaged.  See toCreateDirs above for the full
+		// rationale.  The Maven reactor still builds integration/fuse/target/
+		// (some other modules pull it transitively for tests); we just don't
+		// move the resulting jar into the shipped tarball.
 		// Generate Helm templates in the dstPath
 		run("adding Helm chart", "cp", "-r", filepath.Join(srcPath, "integration/kubernetes/helm-chart"), filepath.Join(dstPath, "integration/kubernetes/helm-chart"))
 		if !opts.SkipHelm {
