@@ -125,8 +125,20 @@
     <argLine></argLine>
     <apache.curator.version>4.2.0</apache.curator.version>
     <aws.amazonaws.version>1.12.797</aws.amazonaws.version>
-    <!-- Pin this version to make the library compatible with netty 4.1.52.Final version -->
-    <awssdk.version>2.15.79</awssdk.version>
+    <!-- Sophos fork: bumped from upstream's 2.15.79 (Aug-2021) to 2.44.7
+         (May-2026, latest GA of the AWS SDK for Java v2) for CVE
+         remediation in software.amazon.awssdk:* and its transitives.
+         The original pin comment ("compatible with netty 4.1.52.Final")
+         is no longer relevant because we bumped netty to 4.1.133.Final
+         in f896743ee0 and the parent pom's netty-bom import below
+         (line ~411) coerces every transitive netty artifact, including
+         the ones pulled in by software.amazon.awssdk:netty-nio-client,
+         to that single version.  Verified that all v2 imports used by
+         this fork (S3AsyncClient + builder, S3Configuration, the auth
+         providers, NettyNioAsyncHttpClient, ListObjectsV2Iterable
+         paginator, S3 model classes) are core APIs that have been
+         stable across the 2.x line. -->
+    <awssdk.version>2.44.7</awssdk.version>
     <build.path>build</build.path>
     <catalyst.version>1.2.1</catalyst.version>
     <glusterfs-hadoop.version>2.3.13</glusterfs-hadoop.version>
