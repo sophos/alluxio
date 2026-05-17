@@ -99,16 +99,22 @@ var libJars = map[string]struct{}{
 	"underfs-web":           {},
 }
 
+// Sophos-only set: ship only the underfs and integration jars that the
+// Sophos Central deployment actually loads at runtime.  The helm chart
+// configures Alluxio with `alluxio.underfs.s3.*` (S3 via underfs-s3a),
+// the on-node SSD cache tier uses underfs-local, and the validation
+// tool is the standard pre-flight diagnostic.  Every other underfs
+// connector (CephFS, Tencent COS, GCS, Swift, HTTP) is dead weight in
+// this fork; dropping them from defaultLibJars keeps the tarball and
+// the resulting OCI image lean and reduces dependency-driven CVE
+// surface (e.g. underfs-gcs bundles a vulnerable protobuf-java).  The
+// jars are still produced by the Maven reactor via underfs/pom.xml,
+// just not copied into alluxio-<ver>-bin.tar.gz by the Go packager.
 var defaultLibJars = map[string]struct{}{
 	"integration-tools-validation": {},
 
-	"underfs-cos":    {},
-	"underfs-cephfs": {},
-	"underfs-gcs":    {},
-	"underfs-local":  {},
-	"underfs-s3a":    {},
-	"underfs-swift":  {},
-	"underfs-web":    {},
+	"underfs-local": {},
+	"underfs-s3a":   {},
 }
 
 var fuseLibJars = map[string]struct{}{

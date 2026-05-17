@@ -127,31 +127,7 @@
               <executable>sh</executable>
               <arguments>
                 <argument>-c</argument>
-                <argument>
-                  set -eu
-                  cd ${project.parent.basedir}
-                  rm -f \
-                    lib/alluxio-underfs-hadoop-2*.jar \
-                    lib/alluxio-underfs-hadoop-3.2*.jar \
-                    lib/alluxio-underfs-hdfs-2*.jar \
-                    lib/alluxio-underfs-hdfs-3.2*.jar \
-                    lib/alluxio-underfs-*ozone*.jar \
-                    lib/alluxio-underfs-cephfs-hadoop-*.jar \
-                    lib/alluxio-underfs-hadoop-cosn-*.jar \
-                    lib/alluxio-underfs-wasb-*.jar \
-                    lib/alluxio-underfs-abfs-*.jar \
-                    lib/alluxio-underfs-adl-*.jar \
-                    lib/alluxio-underfs-obs-*.jar \
-                    lib/alluxio-underfs-oss-*.jar \
-                    lib/alluxio-integration-tools-hms-*.jar \
-                    lib/alluxio-underfs-cephfs-*.jar \
-                    lib/alluxio-underfs-cos-*.jar \
-                    lib/alluxio-underfs-gcs-*.jar \
-                    lib/alluxio-underfs-swift-*.jar \
-                    lib/alluxio-underfs-web-*.jar \
-                    client/alluxio-*-hadoop2-client.jar \
-                    client/alluxio-*-hadoop3-client.jar
-                </argument>
+                <argument>rm -f ${project.parent.basedir}/lib/alluxio-underfs-hadoop-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-*ozone*.jar ${project.parent.basedir}/lib/alluxio-underfs-cephfs-hadoop-*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-cosn-*.jar ${project.parent.basedir}/lib/alluxio-underfs-wasb-*.jar ${project.parent.basedir}/lib/alluxio-underfs-abfs-*.jar ${project.parent.basedir}/lib/alluxio-underfs-adl-*.jar ${project.parent.basedir}/lib/alluxio-underfs-obs-*.jar ${project.parent.basedir}/lib/alluxio-underfs-oss-*.jar ${project.parent.basedir}/lib/alluxio-integration-tools-hms-*.jar</argument>
               </arguments>
             </configuration>
           </execution>
