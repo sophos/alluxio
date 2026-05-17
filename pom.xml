@@ -132,17 +132,17 @@
     <glusterfs-hadoop.version>2.3.13</glusterfs-hadoop.version>
     <grpc.version>1.54.1</grpc.version>
     <gson.version>2.8.9</gson.version>
-    <netty.version>4.1.87.Final</netty.version>
+    <netty.version>4.1.133.Final</netty.version>
     <rocksdb.version>7.0.3</rocksdb.version>
     <hadoop.version>3.3.4</hadoop.version>
     <jacoco.version>0.8.5</jacoco.version>
     <java.version>1.8</java.version>
     <jaxb.version>2.3.3</jaxb.version>
     <jersey.version>2.34</jersey.version>
-    <jetty.version>9.4.46.v20220331</jetty.version>
+    <jetty.version>9.4.58.v20250814</jetty.version>
     <junit.version>4.13.1</junit.version>
     <jupiter.version>5.9.2</jupiter.version>
-    <log4j.version>2.17.1</log4j.version>
+    <log4j.version>2.25.4</log4j.version>
     <maven.version>3.3.9</maven.version>
     <metrics.version>4.1.11</metrics.version>
     <mockito.version>3.4.4</mockito.version>
@@ -657,6 +657,20 @@
             <artifactId>logback-core</artifactId>
           </exclusion>
         </exclusions>
+      </dependency>
+      <!-- Patch CVE-2022-40150, CVE-2022-45685, CVE-2022-45693, CVE-2023-1436 in transitive Jettison (pulled via Jersey/Hadoop). -->
+      <dependency>
+        <groupId>org.codehaus.jettison</groupId>
+        <artifactId>jettison</artifactId>
+        <version>1.5.4</version>
+      </dependency>
+      <!-- Coerce all transitive Eclipse Jetty 9.4 artifacts (e.g. jetty-io, jetty-http) to ${jetty.version}. -->
+      <dependency>
+        <groupId>org.eclipse.jetty</groupId>
+        <artifactId>jetty-bom</artifactId>
+        <version>${jetty.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
       </dependency>
       <dependency>
         <groupId>org.eclipse.jetty</groupId>
