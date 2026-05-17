@@ -24,7 +24,24 @@
 
   <modules>
     <module>hive</module>
-    <module>glue</module>
+    <!--
+      Sophos fork: alluxio-table-server-underdb-glue is excluded from
+      the reactor.  The Sophos Central deployment does not run the
+      Alluxio table catalog service against AWS Glue (or any external
+      metastore via the Glue UDB), so the resulting jar was already
+      absent from the shipped tarball: the upstream Go packager
+      (dev/scripts/.../generate-tarball.go) never copies any
+      alluxio-table-* artifact into lib/, only the underfs- and
+      integration-tools- jars listed in cmd/common.go's defaultLibJars.
+      Building the module anyway pulled aws-java-sdk-glue / -core
+      v1.11.820 (now v1.12.797) and ~hive 2.3.7 transitive deps onto
+      the BlackDuck source-side dep graph for no runtime benefit, and
+      kept ~50 com.amazonaws.* import lines alive that would block a
+      future v1-only SDK retirement.  The source tree under
+      table/server/underdb/glue/ is left in place so the diff against
+      upstream stays minimal and a future hive-style restore is a
+      one-line revert.
+    -->
   </modules>
 
   <properties>
