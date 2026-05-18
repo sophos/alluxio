@@ -170,7 +170,7 @@
     <project.build.outputTimestamp>${git.commit.time}</project.build.outputTimestamp>
     <slf4j.version>1.7.30</slf4j.version>
     <snakeyaml.version>2.0</snakeyaml.version>
-    <jackson.version>2.15.4</jackson.version>
+    <jackson.version>2.18.4</jackson.version>
     <hadoop-cos.version>3.1.0-5.8.5</hadoop-cos.version>
     <cos_api.version>5.6.19</cos_api.version>
     <surefire.forkCount>2</surefire.forkCount>
@@ -1112,8 +1112,23 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
+          <!-- Sophos fork: bumped from upstream 3.2.3 to 3.5.3.  3.2.x ships
+               with ASM 7.x which only understands class-file major versions
+               <= 56 (Java 12).  Modern transitives (jackson-core 2.14+,
+               aws-java-sdk-* 1.12.5xx+, ...) ship multi-release JAR entries
+               under META-INF/versions/17/ that are major version 61 (Java
+               17), which causes the shade goal to fail with
+                 java.lang.IllegalArgumentException:
+                   Unsupported class file major version 61
+               on every uber-jar module the moment a transitive bumps.
+               3.5.3 (May-2024) ships with ASM 9.7 which supports up to
+               Java 23 class files, and otherwise behaves identically to
+               3.2.x for our shade configurations (no MANIFEST or
+               services-resource-merger behavior changes that affect the
+               existing produced uber-jars).
+               Original upstream comment retained below for context: -->
           <!-- Needs to be 2.4.2 or later to prevent MSHADE-148 -->
-          <version>3.2.3</version>
+          <version>3.5.3</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>

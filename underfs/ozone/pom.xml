@@ -119,7 +119,10 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
-        <version>3.2.4</version>
+        <!-- Sophos fork: must match the parent pom's pluginManagement
+             entry (3.5.3, see comment there) so jackson-core 2.14+ MR-JAR
+             Java-17 entries can be shaded without ASM choking. -->
+        <version>3.5.3</version>
         <executions>
           <execution>
             <id>shade</id>
