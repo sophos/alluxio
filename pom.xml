@@ -170,7 +170,7 @@
     <project.build.outputTimestamp>${git.commit.time}</project.build.outputTimestamp>
     <slf4j.version>1.7.30</slf4j.version>
     <snakeyaml.version>2.0</snakeyaml.version>
-    <jackson.version>2.18.4</jackson.version>
+    <jackson.version>2.15.4</jackson.version>
     <hadoop-cos.version>3.1.0-5.8.5</hadoop-cos.version>
     <cos_api.version>5.6.19</cos_api.version>
     <surefire.forkCount>2</surefire.forkCount>
