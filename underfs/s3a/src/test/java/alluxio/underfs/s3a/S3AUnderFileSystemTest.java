@@ -23,9 +23,6 @@ import alluxio.underfs.options.DeleteOptions;
 
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.AmazonServiceException;
-import com.amazonaws.auth.AWSCredentialsProvider;
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.AccessControlList;
 import com.amazonaws.services.s3.model.ListObjectsV2Request;
@@ -40,7 +37,18 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.transfer.s3.S3TransferManager;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -63,9 +71,11 @@ public class S3AUnderFileSystemTest {
 
   private S3AUnderFileSystem mS3UnderFileSystem;
   private AmazonS3Client mClient;
+  private S3Client mS3Client;
   private S3AsyncClient mAsyncClient;
   private ListeningExecutorService mExecutor;
   private TransferManager mManager;
+  private S3TransferManager mV2TransferManager;
 
   @Rule
   public final ExpectedException mThrown = ExpectedException.none();
@@ -73,13 +83,16 @@ public class S3AUnderFileSystemTest {
   @Before
   public void before() throws AmazonClientException {
     mClient = Mockito.mock(AmazonS3Client.class);
+    mS3Client = Mockito.mock(S3Client.class);
     mExecutor = Mockito.mock(ListeningExecutorService.class);
     mManager = Mockito.mock(TransferManager.class);
+    mV2TransferManager = Mockito.mock(S3TransferManager.class);
     mAsyncClient = Mockito.mock(S3AsyncClient.class);
     mS3UnderFileSystem =
         new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
-            mClient, mAsyncClient, BUCKET_NAME,
-            mExecutor, mManager, UnderFileSystemConfiguration.defaults(CONF), false);
+            mClient, mS3Client, mAsyncClient, BUCKET_NAME,
+            mExecutor, mManager, mV2TransferManager,
+            UnderFileSystemConfiguration.defaults(CONF), false);
   }
 
   @Test
@@ -102,32 +115,26 @@ public class S3AUnderFileSystemTest {
 
   @Test
   public void isFile404() throws IOException {
-    AmazonServiceException e = new AmazonServiceException("");
-    e.setStatusCode(404);
-    Mockito.when(
-        mClient.getObjectMetadata(ArgumentMatchers.anyString(), ArgumentMatchers.anyString()))
-        .thenThrow(e);
+    Mockito.when(mS3Client.headObject(ArgumentMatchers.any(HeadObjectRequest.class)))
+        .thenThrow(NoSuchKeyException.builder().statusCode(404).build());
 
     Assert.assertFalse(mS3UnderFileSystem.isFile(SRC));
   }
 
   @Test
   public void isFileException() throws IOException {
-    AmazonServiceException e = new AmazonServiceException("");
-    e.setStatusCode(403);
-    Mockito.when(
-        mClient.getObjectMetadata(ArgumentMatchers.anyString(), ArgumentMatchers.anyString()))
-        .thenThrow(e);
+    Mockito.when(mS3Client.headObject(ArgumentMatchers.any(HeadObjectRequest.class)))
+        .thenThrow((S3Exception) S3Exception.builder().statusCode(403).message("Forbidden")
+            .build());
 
     mThrown.expect(AlluxioS3Exception.class);
     Assert.assertFalse(mS3UnderFileSystem.isFile(SRC));
   }
 
   @Test
-  public void renameOnAmazonClientException() throws IOException {
-    Mockito.when(
-        mClient.getObjectMetadata(ArgumentMatchers.anyString(), ArgumentMatchers.anyString()))
-        .thenThrow(AmazonClientException.class);
+  public void renameOnSdkException() throws IOException {
+    Mockito.when(mS3Client.headObject(ArgumentMatchers.any(HeadObjectRequest.class)))
+        .thenThrow(SdkException.builder().message("boom").build());
 
     mThrown.expect(AlluxioS3Exception.class);
     mS3UnderFileSystem.renameFile(SRC, DST);
@@ -140,11 +147,12 @@ public class S3AUnderFileSystemTest {
     conf.put(PropertyKey.S3A_SECRET_KEY, "key2");
     try (Closeable c = new ConfigurationRule(conf, CONF).toResource()) {
       UnderFileSystemConfiguration ufsConf = UnderFileSystemConfiguration.defaults(CONF);
-      AWSCredentialsProvider credentialsProvider =
+      AwsCredentialsProvider credentialsProvider =
           S3AUnderFileSystem.createAwsCredentialsProvider(ufsConf);
-      Assert.assertEquals("key1", credentialsProvider.getCredentials().getAWSAccessKeyId());
-      Assert.assertEquals("key2", credentialsProvider.getCredentials().getAWSSecretKey());
-      Assert.assertTrue(credentialsProvider instanceof AWSStaticCredentialsProvider);
+      AwsCredentials creds = credentialsProvider.resolveCredentials();
+      Assert.assertEquals("key1", creds.accessKeyId());
+      Assert.assertEquals("key2", creds.secretAccessKey());
+      Assert.assertTrue(credentialsProvider instanceof StaticCredentialsProvider);
     }
   }
 
@@ -156,9 +164,9 @@ public class S3AUnderFileSystemTest {
     conf.put(PropertyKey.S3A_SECRET_KEY, null);
     try (Closeable c = new ConfigurationRule(conf, CONF).toResource()) {
       UnderFileSystemConfiguration ufsConf = UnderFileSystemConfiguration.defaults(CONF);
-      AWSCredentialsProvider credentialsProvider =
+      AwsCredentialsProvider credentialsProvider =
           S3AUnderFileSystem.createAwsCredentialsProvider(ufsConf);
-      Assert.assertTrue(credentialsProvider instanceof DefaultAWSCredentialsProviderChain);
+      Assert.assertTrue(credentialsProvider instanceof DefaultCredentialsProvider);
     }
   }
 
@@ -188,8 +196,9 @@ public class S3AUnderFileSystemTest {
     try (Closeable c = new ConfigurationRule(conf, CONF).toResource()) {
       S3AUnderFileSystem s3UnderFileSystem =
               new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME), mClient,
-                  mAsyncClient, BUCKET_NAME,
-                  mExecutor, mManager, UnderFileSystemConfiguration.defaults(CONF), false);
+                  mS3Client, mAsyncClient, BUCKET_NAME,
+                  mExecutor, mManager, mV2TransferManager,
+                  UnderFileSystemConfiguration.defaults(CONF), false);
 
       Mockito.when(mClient.getS3AccountOwner()).thenReturn(new Owner("111", "test"));
       Mockito.when(mClient.getBucketAcl(Mockito.anyString())).thenReturn(new AccessControlList());
@@ -208,8 +217,9 @@ public class S3AUnderFileSystemTest {
     try (Closeable c = new ConfigurationRule(conf, CONF).toResource()) {
       S3AUnderFileSystem s3UnderFileSystem =
               new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
-                  mClient, mAsyncClient, BUCKET_NAME,
-                  mExecutor, mManager, UnderFileSystemConfiguration.defaults(CONF), false);
+                  mClient, mS3Client, mAsyncClient, BUCKET_NAME,
+                  mExecutor, mManager, mV2TransferManager,
+                  UnderFileSystemConfiguration.defaults(CONF), false);
 
       Mockito.when(mClient.getS3AccountOwner()).thenReturn(new Owner("0", "test"));
       Mockito.when(mClient.getBucketAcl(Mockito.anyString())).thenReturn(new AccessControlList());
@@ -264,9 +274,8 @@ public class S3AUnderFileSystemTest {
 
   @Test
   public void getNullLastModifiedTime() throws IOException {
-    Mockito.when(
-        mClient.getObjectMetadata(ArgumentMatchers.anyString(), ArgumentMatchers.anyString()))
-        .thenReturn(new ObjectMetadata());
+    Mockito.when(mS3Client.headObject(ArgumentMatchers.any(HeadObjectRequest.class)))
+        .thenReturn(HeadObjectResponse.builder().contentLength(0L).build());
     // throw NPE before https://github.com/Alluxio/alluxio/pull/14641
     mS3UnderFileSystem.getObjectStatus(PATH);
   }

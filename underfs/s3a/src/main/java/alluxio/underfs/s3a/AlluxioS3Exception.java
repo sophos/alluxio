@@ -17,6 +17,8 @@ import alluxio.grpc.ErrorType;
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.services.s3.model.AmazonS3Exception;
 import io.grpc.Status;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.exception.SdkException;
 
 import java.net.HttpURLConnection;
 
@@ -53,6 +55,40 @@ public class AlluxioS3Exception extends AlluxioRuntimeException {
       errorMessage = errorDescription;
     }
     return new AlluxioS3Exception(status, errorMessage, cause, cause.isRetryable());
+  }
+
+  /**
+   * Converts an AWS SDK v2 {@link SdkException} to a corresponding AlluxioS3Exception.
+   * @param cause aws sdk v2 exception
+   * @return alluxio s3 exception
+   */
+  public static AlluxioS3Exception from(SdkException cause) {
+    return from(null, cause);
+  }
+
+  /**
+   * Converts an AWS SDK v2 {@link SdkException} with errormessage to a corresponding
+   * AlluxioS3Exception. {@link AwsServiceException} subclasses (including
+   * {@code software.amazon.awssdk.services.s3.model.S3Exception}) provide the same
+   * HTTP status code mapping as the v1 path.
+   * @param errorMessage error message
+   * @param cause aws sdk v2 exception
+   * @return alluxio s3 exception
+   */
+  public static AlluxioS3Exception from(String errorMessage, SdkException cause) {
+    Status status = Status.UNKNOWN;
+    String errorDescription = "ClientException:" + cause.getMessage();
+    if (cause instanceof AwsServiceException) {
+      AwsServiceException ase = (AwsServiceException) cause;
+      status = httpStatusToGrpcStatus(ase.statusCode());
+      String errorCode = ase.awsErrorDetails() == null
+          ? "AwsServiceException" : ase.awsErrorDetails().errorCode();
+      errorDescription = errorCode + ":" + ase.getMessage();
+    }
+    if (errorMessage == null) {
+      errorMessage = errorDescription;
+    }
+    return new AlluxioS3Exception(status, errorMessage, cause, cause.retryable());
   }
 
   private AlluxioS3Exception(Status status, String message, Throwable cause, boolean isRetryAble) {

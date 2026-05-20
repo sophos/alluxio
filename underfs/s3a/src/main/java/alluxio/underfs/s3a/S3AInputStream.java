@@ -13,33 +13,37 @@ package alluxio.underfs.s3a;
 
 import alluxio.retry.RetryPolicy;
 
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.AmazonS3Exception;
-import com.amazonaws.services.s3.model.GetObjectRequest;
-import com.amazonaws.services.s3.model.S3ObjectInputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.IOException;
 import java.io.InputStream;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
- * A wrapper around an {@link S3ObjectInputStream} which handles skips efficiently.
+ * A wrapper around an SDK v2 {@link ResponseInputStream} which handles skips by reopening at
+ * the new position. Rewritten on the SDK v2 sync client in Phase 2.1 (CSA-21975); the previous
+ * v1 {@link com.amazonaws.services.s3.model.S3ObjectInputStream}-based implementation is gone.
  */
 @NotThreadSafe
 public class S3AInputStream extends InputStream {
   private static final Logger LOG = LoggerFactory.getLogger(S3AInputStream.class);
 
   /** Client for operations with s3. */
-  protected AmazonS3 mClient;
+  protected S3Client mClient;
   /** Name of the bucket the object resides in. */
   protected final String mBucketName;
   /** The path of the object to read. */
   protected final String mKey;
 
   /** The backing input stream from s3. */
-  protected S3ObjectInputStream mIn;
+  protected ResponseInputStream<GetObjectResponse> mIn;
   /** The current position of the stream. */
   protected long mPos;
 
@@ -50,21 +54,21 @@ public class S3AInputStream extends InputStream {
   protected final RetryPolicy mRetryPolicy;
 
   /**
-   * Constructor for an input stream of an object in s3 using the aws-sdk implementation to read
-   * the data. The stream will be positioned at the start of the file.
+   * Constructor for an input stream of an object in s3 using the aws-sdk v2 implementation to
+   * read the data. The stream will be positioned at the start of the file.
    *
    * @param bucketName the bucket the object resides in
    * @param key the path of the object to read
    * @param client the s3 client to use for operations
    * @param retryPolicy retry policy in case the key does not exist
    */
-  public S3AInputStream(String bucketName, String key, AmazonS3 client, RetryPolicy retryPolicy) {
+  public S3AInputStream(String bucketName, String key, S3Client client, RetryPolicy retryPolicy) {
     this(bucketName, key, client, 0L, retryPolicy);
   }
 
   /**
-   * Constructor for an input stream of an object in s3 using the aws-sdk implementation to read the
-   * data. The stream will be positioned at the specified position.
+   * Constructor for an input stream of an object in s3 using the aws-sdk v2 implementation to
+   * read the data. The stream will be positioned at the specified position.
    *
    * @param bucketName the bucket the object resides in
    * @param key the path of the object to read
@@ -72,7 +76,7 @@ public class S3AInputStream extends InputStream {
    * @param position the position to begin reading from
    * @param retryPolicy retry policy in case the key does not exist
    */
-  public S3AInputStream(String bucketName, String key, AmazonS3 client,
+  public S3AInputStream(String bucketName, String key, S3Client client,
       long position, RetryPolicy retryPolicy) {
     mBucketName = bucketName;
     mKey = key;
@@ -136,19 +140,21 @@ public class S3AInputStream extends InputStream {
     if (mIn != null) { // stream is already open
       return;
     }
-    GetObjectRequest getReq = new GetObjectRequest(mBucketName, mKey);
-    // If the position is 0, setting range is redundant and causes an error if the file is 0 length
+    GetObjectRequest.Builder builder = GetObjectRequest.builder()
+        .bucket(mBucketName)
+        .key(mKey);
+    // If the position is 0, setting the Range is redundant and causes an error on 0-length objects.
     if (mPos > 0) {
-      getReq.setRange(mPos);
+      builder.range("bytes=" + mPos + "-");
     }
-    AmazonS3Exception lastException = null;
+    GetObjectRequest getReq = builder.build();
     String errorMessage = String.format("Failed to open key: %s bucket: %s, left retry:%d",
         mKey, mBucketName, mRetryPolicy.getAttemptCount());
     while (mRetryPolicy.attempt()) {
       try {
-        mIn = getClient().getObject(getReq).getObjectContent();
+        mIn = getClient().getObject(getReq, ResponseTransformer.toInputStream());
         return;
-      } catch (AmazonS3Exception e) {
+      } catch (S3Exception e) {
         errorMessage = String
             .format("Failed to open key: %s bucket: %s attempts: %d error: %s", mKey, mBucketName,
                 mRetryPolicy.getAttemptCount(), e.getMessage());
@@ -160,7 +166,7 @@ public class S3AInputStream extends InputStream {
   /**
    * @return the client
    */
-  protected AmazonS3 getClient() {
+  protected S3Client getClient() {
     return mClient;
   }
 

@@ -46,6 +46,9 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.transfer.s3.S3TransferManager;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -95,16 +98,32 @@ public class S3AUnderFileSystemMockServerTest {
             new AwsClientBuilder.EndpointConfiguration(mS3Proxy.getUri().toString(),
                 Regions.US_WEST_2.getName()))
         .build();
-    S3AsyncClient asyncClient =
-        S3AsyncClient.builder().credentialsProvider(StaticCredentialsProvider.create(
-                AwsBasicCredentials.create(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
-            .endpointOverride(mS3Proxy.getUri()).region(Region.US_WEST_2).build();
+    StaticCredentialsProvider v2Creds = StaticCredentialsProvider.create(
+        AwsBasicCredentials.create(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey()));
+    S3AsyncClient asyncClient = S3AsyncClient.builder()
+        .credentialsProvider(v2Creds)
+        .endpointOverride(mS3Proxy.getUri())
+        .region(Region.US_WEST_2)
+        .build();
+    S3Client syncClient = S3Client.builder()
+        .credentialsProvider(v2Creds)
+        .endpointOverride(mS3Proxy.getUri())
+        .region(Region.US_WEST_2)
+        .serviceConfiguration(S3Configuration.builder()
+            .pathStyleAccessEnabled(true)
+            // S3Proxy (jclouds backend) returns 501 on requests carrying SDK v2's default
+            // response-checksum-mode header. Production S3 / S3 Express handle it fine.
+            .checksumValidationEnabled(false)
+            .build())
+        .build();
     mClient.createBucket(TEST_BUCKET);
 
+    S3TransferManager v2TransferManager = S3TransferManager.builder()
+        .s3Client(asyncClient).build();
     mS3UnderFileSystem =
         new S3AUnderFileSystem(new AlluxioURI("s3://" + TEST_BUCKET), mClient,
-            asyncClient, TEST_BUCKET,
-            Executors.newSingleThreadExecutor(), new TransferManager(),
+            syncClient, asyncClient, TEST_BUCKET,
+            Executors.newSingleThreadExecutor(), new TransferManager(), v2TransferManager,
             UnderFileSystemConfiguration.defaults(CONF), false);
   }
 

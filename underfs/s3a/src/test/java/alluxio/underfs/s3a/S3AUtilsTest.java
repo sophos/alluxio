@@ -19,6 +19,12 @@ import com.amazonaws.services.s3.model.Permission;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import software.amazon.awssdk.services.s3.model.GetBucketAclResponse;
+import software.amazon.awssdk.services.s3.model.Grant;
+import software.amazon.awssdk.services.s3.model.Grantee;
+import software.amazon.awssdk.services.s3.model.Type;
+
+import java.util.Arrays;
 
 /**
  * Tests for {@link S3AUtils} methods.
@@ -121,5 +127,89 @@ public final class S3AUtilsTest {
     mUserGrantee.setIdentifier(null);
     mAcl.grantPermission(mUserGrantee, Permission.Read);
     Assert.assertEquals((short) 0000, S3AUtils.translateBucketAcl(mAcl, OTHER_ID));
+  }
+
+  // --- SDK v2 (GetBucketAclResponse) overload tests ---
+
+  private static final String ALL_USERS_URI =
+      "http://acs.amazonaws.com/groups/global/AllUsers";
+  private static final String AUTH_USERS_URI =
+      "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+
+  private static GetBucketAclResponse aclV2(Grant... grants) {
+    return GetBucketAclResponse.builder().grants(Arrays.asList(grants)).build();
+  }
+
+  private static Grant userGrantV2(String id,
+      software.amazon.awssdk.services.s3.model.Permission perm) {
+    return Grant.builder()
+        .grantee(Grantee.builder().type(Type.CANONICAL_USER).id(id).build())
+        .permission(perm).build();
+  }
+
+  private static Grant groupGrantV2(String groupUri,
+      software.amazon.awssdk.services.s3.model.Permission perm) {
+    return Grant.builder()
+        .grantee(Grantee.builder().type(Type.GROUP).uri(groupUri).build())
+        .permission(perm).build();
+  }
+
+  @Test
+  public void translateUserPermissionsV2() {
+    Assert.assertEquals((short) 0500,
+        S3AUtils.translateBucketAcl(
+            aclV2(userGrantV2(ID, software.amazon.awssdk.services.s3.model.Permission.READ)), ID));
+    Assert.assertEquals((short) 0000,
+        S3AUtils.translateBucketAcl(
+            aclV2(userGrantV2(ID, software.amazon.awssdk.services.s3.model.Permission.READ)),
+            OTHER_ID));
+    Assert.assertEquals((short) 0200,
+        S3AUtils.translateBucketAcl(
+            aclV2(userGrantV2(ID, software.amazon.awssdk.services.s3.model.Permission.WRITE)), ID));
+    Assert.assertEquals((short) 0700,
+        S3AUtils.translateBucketAcl(
+            aclV2(userGrantV2(ID,
+                software.amazon.awssdk.services.s3.model.Permission.FULL_CONTROL)),
+            ID));
+  }
+
+  @Test
+  public void translateGroupPermissionsV2() {
+    Assert.assertEquals((short) 0500,
+        S3AUtils.translateBucketAcl(
+            aclV2(groupGrantV2(ALL_USERS_URI,
+                software.amazon.awssdk.services.s3.model.Permission.READ)),
+            OTHER_ID));
+    Assert.assertEquals((short) 0200,
+        S3AUtils.translateBucketAcl(
+            aclV2(groupGrantV2(AUTH_USERS_URI,
+                software.amazon.awssdk.services.s3.model.Permission.WRITE)),
+            OTHER_ID));
+    Assert.assertEquals((short) 0700,
+        S3AUtils.translateBucketAcl(
+            aclV2(groupGrantV2(ALL_USERS_URI,
+                software.amazon.awssdk.services.s3.model.Permission.FULL_CONTROL)),
+            OTHER_ID));
+  }
+
+  @Test
+  public void translateNullIdGranteeV2() {
+    // Mirror the v1 nullId corner case: a CanonicalUser grantee with a null id matches no userId.
+    Grant nullIdGrant = Grant.builder()
+        .grantee(Grantee.builder().type(Type.CANONICAL_USER).id(null).build())
+        .permission(software.amazon.awssdk.services.s3.model.Permission.READ)
+        .build();
+    Assert.assertEquals((short) 0000,
+        S3AUtils.translateBucketAcl(aclV2(nullIdGrant), OTHER_ID));
+  }
+
+  @Test
+  public void translateReadAcpIgnoredV2() {
+    // Permissions outside READ/WRITE/FULL_CONTROL contribute no posix bits.
+    Assert.assertEquals((short) 0000,
+        S3AUtils.translateBucketAcl(
+            aclV2(userGrantV2(ID,
+                software.amazon.awssdk.services.s3.model.Permission.READ_ACP)),
+            ID));
   }
 }
