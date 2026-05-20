@@ -1,6 +1,6 @@
 # CSA-21975 — Phase 0 Inventory: AWS SDK v2 Migration + S3 Express Support
 
-> Status: Phase 0 (Discovery & Inventory) — in progress
+> Status: Phase 3 (Maven cleanup) code work done — image build / dev cutover still outstanding
 > Branch: `sophos/CSA-21975-sdk-v2-migration` (from `sophos/release-2.9.6`)
 > Full plan: see `alluxio-sdk-v2-and-s3express-plan.md` in the `taegis/trino` monorepo.
 
