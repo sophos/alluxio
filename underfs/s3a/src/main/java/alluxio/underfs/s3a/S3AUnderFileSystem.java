@@ -45,11 +45,6 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.internal.ServiceUtils;
-import com.amazonaws.services.s3.model.ListObjectsRequest;
-import com.amazonaws.services.s3.model.ListObjectsV2Request;
-import com.amazonaws.services.s3.model.ListObjectsV2Result;
-import com.amazonaws.services.s3.model.ObjectListing;
-import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
 import com.amazonaws.util.AwsHostNameUtils;
@@ -81,6 +76,7 @@ import software.amazon.awssdk.services.s3.S3AsyncClientBuilder;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.Delete;
@@ -93,7 +89,13 @@ import software.amazon.awssdk.services.s3.model.GetBucketAclResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
+import software.amazon.awssdk.services.s3.model.ListMultipartUploadsRequest;
+import software.amazon.awssdk.services.s3.model.ListMultipartUploadsResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.MultipartUpload;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -655,8 +657,48 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                 ? mUfsConf.getMs(PropertyKey.UNDERFS_S3_INTERMEDIATE_UPLOAD_CLEAN_AGE)
                 : (long) PropertyKey.UNDERFS_S3_INTERMEDIATE_UPLOAD_CLEAN_AGE
                 .getDefaultValue();
-        Date cleanBefore = new Date(new Date().getTime() - cleanAge);
-        mManager.abortMultipartUploads(mBucketName, cleanBefore);
+        Instant cleanBefore = Instant.now().minusMillis(cleanAge);
+        // v2 has no abortMultipartUploads(bucket, Date) convenience — list in-progress MPUs
+        // and abort each one initiated before cleanBefore. Listing is paginated; we follow
+        // the IsTruncated / NextKeyMarker pattern.
+        String keyMarker = null;
+        String uploadIdMarker = null;
+        do {
+            ListMultipartUploadsRequest.Builder reqBuilder = ListMultipartUploadsRequest.builder()
+                    .bucket(mBucketName);
+            if (keyMarker != null) {
+                reqBuilder.keyMarker(keyMarker);
+            }
+            if (uploadIdMarker != null) {
+                reqBuilder.uploadIdMarker(uploadIdMarker);
+            }
+            ListMultipartUploadsResponse listResp;
+            try {
+                listResp = mS3Client.listMultipartUploads(reqBuilder.build());
+            } catch (SdkException e) {
+                LOG.warn("Failed to list in-progress multipart uploads for cleanup", e);
+                return;
+            }
+            for (MultipartUpload upload : listResp.uploads()) {
+                if (upload.initiated() != null && upload.initiated().isBefore(cleanBefore)) {
+                    try {
+                        mS3Client.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                                .bucket(mBucketName)
+                                .key(upload.key())
+                                .uploadId(upload.uploadId())
+                                .build());
+                    } catch (SdkException e) {
+                        LOG.warn("Failed to abort stale multipart upload key={} uploadId={}",
+                                upload.key(), upload.uploadId(), e);
+                    }
+                }
+            }
+            if (!Boolean.TRUE.equals(listResp.isTruncated())) {
+                return;
+            }
+            keyMarker = listResp.nextKeyMarker();
+            uploadIdMarker = listResp.nextUploadIdMarker();
+        } while (true);
     }
 
     @Override
@@ -788,24 +830,25 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         key = key.equals(PATH_SEPARATOR) ? "" : key;
         if (mUfsConf.isSet(PropertyKey.UNDERFS_S3_LIST_OBJECTS_V1) && mUfsConf
                 .getBoolean(PropertyKey.UNDERFS_S3_LIST_OBJECTS_V1)) {
-            ListObjectsRequest request =
-                    new ListObjectsRequest().withBucketName(mBucketName).withPrefix(key)
-                            .withDelimiter(delimiter).withMaxKeys(getListingChunkLength(mUfsConf));
-            ObjectListing result = getObjectListingChunkV1(request);
+            ListObjectsRequest request = ListObjectsRequest.builder()
+                    .bucket(mBucketName).prefix(key).delimiter(delimiter)
+                    .maxKeys(getListingChunkLength(mUfsConf)).build();
+            ListObjectsResponse result = getObjectListingChunkV1(request);
             if (result != null) {
                 return new S3AObjectListingChunkV1(request, result);
             }
         } else {
-            ListObjectsV2Request request =
-                    new ListObjectsV2Request().withBucketName(mBucketName).withPrefix(key)
-                            .withDelimiter(delimiter).withMaxKeys(getListingChunkLength(mUfsConf));
+            ListObjectsV2Request.Builder requestBuilder = ListObjectsV2Request.builder()
+                    .bucket(mBucketName).prefix(key).delimiter(delimiter)
+                    .maxKeys(getListingChunkLength(mUfsConf));
             if (startAfter != null) {
-                request.setStartAfter(startAfter);
+                requestBuilder.startAfter(startAfter);
             }
             if (batchSize > 0) {
-                request.setMaxKeys(batchSize);
+                requestBuilder.maxKeys(batchSize);
             }
-            ListObjectsV2Result result = getObjectListingChunk(request);
+            ListObjectsV2Request request = requestBuilder.build();
+            ListObjectsV2Response result = getObjectListingChunk(request);
             if (result != null) {
                 return new S3AObjectListingChunk(request, result);
             }
@@ -814,31 +857,23 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     // Get next chunk of listing result.
-    private ListObjectsV2Result getObjectListingChunk(ListObjectsV2Request request) {
-        ListObjectsV2Result result;
+    private ListObjectsV2Response getObjectListingChunk(ListObjectsV2Request request) {
         try {
             // Query S3 for the next batch of objects.
-            result = mClient.listObjectsV2(request);
-            // Advance the request continuation token to the next set of objects.
-            request.setContinuationToken(result.getNextContinuationToken());
-        } catch (AmazonClientException e) {
+            return mS3Client.listObjectsV2(request);
+        } catch (SdkException e) {
             throw AlluxioS3Exception.from(e);
         }
-        return result;
     }
 
     // Get next chunk of listing result.
-    private ObjectListing getObjectListingChunkV1(ListObjectsRequest request) {
-        ObjectListing result;
+    private ListObjectsResponse getObjectListingChunkV1(ListObjectsRequest request) {
         try {
             // Query S3 for the next batch of objects.
-            result = mClient.listObjects(request);
-            // Advance the request continuation token to the next set of objects.
-            request.setMarker(result.getNextMarker());
-        } catch (AmazonClientException e) {
+            return mS3Client.listObjects(request);
+        } catch (SdkException e) {
             throw AlluxioS3Exception.from(e);
         }
-        return result;
     }
 
     void performGetStatusAsync(
@@ -1057,13 +1092,13 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     /**
-     * Wrapper over S3 {@link ListObjectsV2Request}.
+     * Wrapper over the v2 {@link ListObjectsV2Request} / {@link ListObjectsV2Response}.
      */
     private final class S3AObjectListingChunk implements ObjectListingChunk {
         final ListObjectsV2Request mRequest;
-        final ListObjectsV2Result mResult;
+        final ListObjectsV2Response mResult;
 
-        S3AObjectListingChunk(ListObjectsV2Request request, ListObjectsV2Result result) {
+        S3AObjectListingChunk(ListObjectsV2Request request, ListObjectsV2Response result) {
             Preconditions.checkNotNull(result, "result");
             mRequest = request;
             mResult = result;
@@ -1071,31 +1106,39 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
 
         @Override
         public ObjectStatus[] getObjectStatuses() {
-            List<S3ObjectSummary> objects = mResult.getObjectSummaries();
+            List<S3Object> objects = mResult.contents();
             ObjectStatus[] ret = new ObjectStatus[objects.size()];
             int i = 0;
-            for (S3ObjectSummary obj : objects) {
-                Date lastModifiedDate = obj.getLastModified();
-                Long lastModifiedTime = lastModifiedDate == null ? null : lastModifiedDate.getTime();
-                ret[i++] = new ObjectStatus(obj.getKey(), obj.getETag(), obj.getSize(),
-                        lastModifiedTime);
+            for (S3Object obj : objects) {
+                Long lastModifiedTime = obj.lastModified() == null
+                        ? null : obj.lastModified().toEpochMilli();
+                ret[i++] = new ObjectStatus(obj.key(), obj.eTag(),
+                        obj.size() == null ? 0L : obj.size(), lastModifiedTime);
             }
             return ret;
         }
 
         @Override
         public String[] getCommonPrefixes() {
-            List<String> res = mResult.getCommonPrefixes();
-            return res.toArray(new String[0]);
+            List<CommonPrefix> res = mResult.commonPrefixes();
+            String[] ret = new String[res.size()];
+            for (int i = 0; i < res.size(); i++) {
+                ret[i] = res.get(i).prefix();
+            }
+            return ret;
         }
 
         @Override
         @Nullable
         public ObjectListingChunk getNextChunk() throws IOException {
-            if (mResult.isTruncated()) {
-                ListObjectsV2Result nextResult = getObjectListingChunk(mRequest);
+            if (Boolean.TRUE.equals(mResult.isTruncated())) {
+                // v2 request models are immutable — build the next request with the new
+                // continuation token taken from the previous response.
+                ListObjectsV2Request next = mRequest.toBuilder()
+                        .continuationToken(mResult.nextContinuationToken()).build();
+                ListObjectsV2Response nextResult = getObjectListingChunk(next);
                 if (nextResult != null) {
-                    return new S3AObjectListingChunk(mRequest, nextResult);
+                    return new S3AObjectListingChunk(next, nextResult);
                 }
             }
             return null;
@@ -1108,13 +1151,14 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     /**
-     * Wrapper over S3 {@link ListObjectsRequest}.
+     * Wrapper over the v2 {@link ListObjectsRequest} / {@link ListObjectsResponse} (the older
+     * marker-paginated listing API, kept for compatibility with v1-listing-only S3 backends).
      */
     private final class S3AObjectListingChunkV1 implements ObjectListingChunk {
         final ListObjectsRequest mRequest;
-        final ObjectListing mResult;
+        final ListObjectsResponse mResult;
 
-        S3AObjectListingChunkV1(ListObjectsRequest request, ObjectListing result) {
+        S3AObjectListingChunkV1(ListObjectsRequest request, ListObjectsResponse result) {
             Preconditions.checkNotNull(result, "result");
             mRequest = request;
             mResult = result;
@@ -1122,31 +1166,37 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
 
         @Override
         public ObjectStatus[] getObjectStatuses() {
-            List<S3ObjectSummary> objects = mResult.getObjectSummaries();
+            List<S3Object> objects = mResult.contents();
             ObjectStatus[] ret = new ObjectStatus[objects.size()];
             int i = 0;
-            for (S3ObjectSummary obj : objects) {
-                Date lastModifiedDate = obj.getLastModified();
-                Long lastModifiedTime = lastModifiedDate == null ? null : lastModifiedDate.getTime();
-                ret[i++] = new ObjectStatus(obj.getKey(), obj.getETag(), obj.getSize(),
-                        lastModifiedTime);
+            for (S3Object obj : objects) {
+                Long lastModifiedTime = obj.lastModified() == null
+                        ? null : obj.lastModified().toEpochMilli();
+                ret[i++] = new ObjectStatus(obj.key(), obj.eTag(),
+                        obj.size() == null ? 0L : obj.size(), lastModifiedTime);
             }
             return ret;
         }
 
         @Override
         public String[] getCommonPrefixes() {
-            List<String> res = mResult.getCommonPrefixes();
-            return res.toArray(new String[0]);
+            List<CommonPrefix> res = mResult.commonPrefixes();
+            String[] ret = new String[res.size()];
+            for (int i = 0; i < res.size(); i++) {
+                ret[i] = res.get(i).prefix();
+            }
+            return ret;
         }
 
         @Override
         @Nullable
         public ObjectListingChunk getNextChunk() throws IOException {
-            if (mResult.isTruncated()) {
-                ObjectListing nextResult = getObjectListingChunkV1(mRequest);
+            if (Boolean.TRUE.equals(mResult.isTruncated())) {
+                ListObjectsRequest next = mRequest.toBuilder()
+                        .marker(mResult.nextMarker()).build();
+                ListObjectsResponse nextResult = getObjectListingChunkV1(next);
                 if (nextResult != null) {
-                    return new S3AObjectListingChunkV1(mRequest, nextResult);
+                    return new S3AObjectListingChunkV1(next, nextResult);
                 }
             }
             return null;

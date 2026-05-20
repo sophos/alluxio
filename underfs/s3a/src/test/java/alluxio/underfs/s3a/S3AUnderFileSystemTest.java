@@ -21,10 +21,7 @@ import alluxio.underfs.UfsMode;
 import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.options.DeleteOptions;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.model.ListObjectsV2Request;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.google.common.util.concurrent.ListeningExecutorService;
@@ -48,6 +45,7 @@ import software.amazon.awssdk.services.s3.model.GetBucketAclResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.Owner;
 import software.amazon.awssdk.services.s3.model.S3Exception;
@@ -83,7 +81,7 @@ public class S3AUnderFileSystemTest {
   public final ExpectedException mThrown = ExpectedException.none();
 
   @Before
-  public void before() throws AmazonClientException {
+  public void before() {
     mClient = Mockito.mock(AmazonS3Client.class);
     mS3Client = Mockito.mock(S3Client.class);
     mExecutor = Mockito.mock(ListeningExecutorService.class);
@@ -98,18 +96,18 @@ public class S3AUnderFileSystemTest {
   }
 
   @Test
-  public void deleteNonRecursiveOnAmazonClientException() throws IOException {
-    Mockito.when(mClient.listObjectsV2(ArgumentMatchers.any(ListObjectsV2Request.class)))
-        .thenThrow(AmazonClientException.class);
+  public void deleteNonRecursiveOnSdkException() throws IOException {
+    Mockito.when(mS3Client.listObjectsV2(ArgumentMatchers.any(ListObjectsV2Request.class)))
+        .thenThrow(SdkException.builder().message("boom").build());
 
     mThrown.expect(AlluxioS3Exception.class);
     mS3UnderFileSystem.deleteDirectory(PATH, DeleteOptions.defaults().setRecursive(false));
   }
 
   @Test
-  public void deleteRecursiveOnAmazonClientException() throws IOException {
-    Mockito.when(mClient.listObjectsV2(ArgumentMatchers.any(ListObjectsV2Request.class)))
-        .thenThrow(AmazonClientException.class);
+  public void deleteRecursiveOnSdkException() throws IOException {
+    Mockito.when(mS3Client.listObjectsV2(ArgumentMatchers.any(ListObjectsV2Request.class)))
+        .thenThrow(SdkException.builder().message("boom").build());
 
     mThrown.expect(AlluxioS3Exception.class);
     mS3UnderFileSystem.deleteDirectory(PATH, DeleteOptions.defaults().setRecursive(true));
