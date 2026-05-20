@@ -44,19 +44,13 @@ import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.services.s3.internal.Mimetypes;
 import com.amazonaws.services.s3.internal.ServiceUtils;
 import com.amazonaws.services.s3.model.AccessControlList;
-import com.amazonaws.services.s3.model.CopyObjectRequest;
-import com.amazonaws.services.s3.model.DeleteObjectsRequest;
-import com.amazonaws.services.s3.model.DeleteObjectsResult;
 import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ListObjectsV2Request;
 import com.amazonaws.services.s3.model.ListObjectsV2Result;
 import com.amazonaws.services.s3.model.ObjectListing;
-import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.Owner;
-import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
@@ -78,6 +72,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientAsyncConfiguration;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.exception.SdkException;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.http.nio.netty.Http2Configuration;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
@@ -88,14 +83,25 @@ import software.amazon.awssdk.services.s3.S3AsyncClientBuilder;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.S3Configuration;
-import software.amazon.awssdk.transfer.s3.S3TransferManager;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
+import software.amazon.awssdk.services.s3.model.Delete;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.DeletedObject;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
+import software.amazon.awssdk.transfer.s3.S3TransferManager;
+import software.amazon.awssdk.transfer.s3.model.Copy;
+import software.amazon.awssdk.transfer.s3.model.CopyRequest;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
 import software.amazon.awssdk.services.sts.model.AssumeRoleRequest;
@@ -664,15 +670,23 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         int retries = 3;
         for (int i = 0; i < retries; i++) {
             try {
-                CopyObjectRequest request = new CopyObjectRequest(mBucketName, src, mBucketName, dst);
+                CopyObjectRequest.Builder copyBuilder = CopyObjectRequest.builder()
+                        .sourceBucket(mBucketName)
+                        .sourceKey(src)
+                        .destinationBucket(mBucketName)
+                        .destinationKey(dst);
                 if (mUfsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED)) {
-                    ObjectMetadata meta = new ObjectMetadata();
-                    meta.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
-                    request.setNewObjectMetadata(meta);
+                    copyBuilder.serverSideEncryption(ServerSideEncryption.AES256);
                 }
-                mManager.copy(request).waitForCopyResult();
+                // S3TransferManager.copy uses single-PUT for objects below 5 GB and switches to
+                // multipart upload above; that's the same threshold MULTIPART_COPY_THRESHOLD
+                // (100 MB) hint we used to give the v1 TM — the v2 TM picks its own threshold
+                // and ignores per-request hints, so we pass through and let it decide.
+                Copy copy = mTransferManager.copy(CopyRequest.builder()
+                        .copyObjectRequest(copyBuilder.build()).build());
+                copy.completionFuture().join();
                 return true;
-            } catch (AmazonClientException | InterruptedException e) {
+            } catch (SdkException | java.util.concurrent.CompletionException e) {
                 LOG.error("Failed to copy file {} to {}", src, dst, e);
                 if (i != retries - 1) {
                     LOG.error("Retrying copying file {} to {}", src, dst);
@@ -686,14 +700,16 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     public boolean createEmptyObject(String key) {
         try {
-            ObjectMetadata meta = new ObjectMetadata();
-            meta.setContentLength(0);
-            meta.setContentMD5(DIR_HASH);
-            meta.setContentType(Mimetypes.MIMETYPE_OCTET_STREAM);
-            mClient.putObject(
-                    new PutObjectRequest(mBucketName, key, new ByteArrayInputStream(new byte[0]), meta));
+            mS3Client.putObject(PutObjectRequest.builder()
+                    .bucket(mBucketName)
+                    .key(key)
+                    .contentLength(0L)
+                    .contentMD5(DIR_HASH)
+                    .contentType("application/octet-stream")
+                    .build(),
+                RequestBody.empty());
             return true;
-        } catch (AmazonClientException e) {
+        } catch (SdkException e) {
             LOG.error("Failed to create object: {}", key, e);
             return false;
         }
@@ -712,8 +728,11 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     protected boolean deleteObject(String key) {
         try {
-            mClient.deleteObject(mBucketName, key);
-        } catch (AmazonClientException e) {
+            mS3Client.deleteObject(DeleteObjectRequest.builder()
+                    .bucket(mBucketName)
+                    .key(key)
+                    .build());
+        } catch (SdkException e) {
             LOG.error("Failed to delete {}", key, e);
             return false;
         }
@@ -727,19 +746,20 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         }
         Preconditions.checkArgument(keys != null && keys.size() <= getListingChunkLengthMax());
         try {
-            List<DeleteObjectsRequest.KeyVersion> keysToDelete = new ArrayList<>();
+            List<ObjectIdentifier> objectsToDelete = new ArrayList<>(keys.size());
             for (String key : keys) {
-                keysToDelete.add(new DeleteObjectsRequest.KeyVersion(key));
+                objectsToDelete.add(ObjectIdentifier.builder().key(key).build());
             }
-            DeleteObjectsResult deletedObjectsResult =
-                    mClient.deleteObjects(new DeleteObjectsRequest(mBucketName).withKeys(keysToDelete));
-            List<String> deletedObjects = new ArrayList<>();
-            for (DeleteObjectsResult.DeletedObject deletedObject : deletedObjectsResult
-                    .getDeletedObjects()) {
-                deletedObjects.add(deletedObject.getKey());
+            DeleteObjectsResponse resp = mS3Client.deleteObjects(DeleteObjectsRequest.builder()
+                    .bucket(mBucketName)
+                    .delete(Delete.builder().objects(objectsToDelete).build())
+                    .build());
+            List<String> deletedObjects = new ArrayList<>(resp.deleted().size());
+            for (DeletedObject deletedObject : resp.deleted()) {
+                deletedObjects.add(deletedObject.key());
             }
             return deletedObjects;
-        } catch (AmazonClientException e) {
+        } catch (SdkException e) {
             throw AlluxioS3Exception.from(e);
         }
     }
