@@ -999,12 +999,22 @@ public class InodeTree implements DelegatingJournaled {
 
       // if the parent has default ACL, take the default ACL ANDed with the umask as the new
       // directory's default and access acl
-      // When it is a metadata load operation, do not take the umask into account
-      short mode = context.isMetadataLoad() ? Mode.createFullAccess().toShort()
-          : newDir.getMode();
+      // When it is a metadata load operation, do not take the umask into account.
+      // Same logic applies to active creates when create-inherit-parent-acl is on:
+      // generateChildDirACL uses the supplied mode's group bits as the ACL mask,
+      // so a 0700-style umask collapses every named-user grant to ---. Passing
+      // full-access keeps the inherited entries effective; downstream owner /
+      // mode bits are still tightened back to the caller's mode via the
+      // setMode call inside the isMetadataLoad branch below (and they are
+      // already authoritative for the active path since it does not call
+      // setMode at all here).
       DefaultAccessControlList dAcl = currentInodeDirectory.getDefaultACL();
       boolean preserveInheritedAcl =
-          shouldPreserveInheritedAclOnMetadataLoad(context, dAcl);
+          shouldPreserveInheritedAclOnMetadataLoad(context, dAcl)
+              || shouldPreserveInheritedAclOnCreate(context, dAcl);
+      short mode = (context.isMetadataLoad() || preserveInheritedAcl)
+          ? Mode.createFullAccess().toShort()
+          : newDir.getMode();
       if (!dAcl.isEmpty()) {
         Pair<AccessControlList, DefaultAccessControlList> pair =
             dAcl.generateChildDirACL(mode);
@@ -1050,9 +1060,17 @@ public class InodeTree implements DelegatingJournaled {
 
       // if the parent has a default ACL, copy that default ACL ANDed with the umask as the new
       // file's access ACL.
-      // If it is a metadata load operation, do not consider the umask.
+      // If it is a metadata load operation, do not consider the umask. Same logic applies to
+      // active creates when create-inherit-parent-acl is on — see the matching block in the
+      // directory branch above (and shouldPreserveInheritedAclOnCreate) for why bypassing the
+      // caller's umask is required to keep inherited named-user grants effective.
       DefaultAccessControlList dAcl = currentInodeDirectory.getDefaultACL();
-      short mode = context.isMetadataLoad() ? Mode.createFullAccess().toShort() : newFile.getMode();
+      boolean preserveInheritedAcl =
+          shouldPreserveInheritedAclOnMetadataLoad(context, dAcl)
+              || shouldPreserveInheritedAclOnCreate(context, dAcl);
+      short mode = (context.isMetadataLoad() || preserveInheritedAcl)
+          ? Mode.createFullAccess().toShort()
+          : newFile.getMode();
       if (!dAcl.isEmpty()) {
         AccessControlList acl = dAcl.generateChildFileACL(mode);
         newFile.setInternalAcl(acl);
@@ -1103,6 +1121,23 @@ public class InodeTree implements DelegatingJournaled {
     return context.isMetadataLoad()
         && !parentDefaultAcl.isEmpty()
         && Configuration.getBoolean(PropertyKey.SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL);
+  }
+
+  // Companion of shouldPreserveInheritedAclOnMetadataLoad for the active
+  // create path (CreateFile / CreateDirectory called by external clients,
+  // not by UFS metadata sync). Without this, generateChild{File,Dir}ACL
+  // gets called with the caller's umask-restricted mode, whose group bits
+  // are typically zero — which silently masks away every inherited
+  // named-user / named-group grant (mask::rwx -> mask::---). Gated behind
+  // a separate property so the fix is opt-in for operators who have not
+  // audited their default-ACL surface yet; pair with the existing
+  // sync.inherit-parent-acl knob when both paths need POSIX-style
+  // inheritance (typical multi-tenant setup).
+  private static boolean shouldPreserveInheritedAclOnCreate(
+      CreatePathContext<?, ?> context, DefaultAccessControlList parentDefaultAcl) {
+    return !context.isMetadataLoad()
+        && !parentDefaultAcl.isEmpty()
+        && Configuration.getBoolean(PropertyKey.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL);
   }
 
   /**
