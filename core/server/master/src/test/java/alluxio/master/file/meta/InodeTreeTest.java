@@ -245,25 +245,31 @@ public final class InodeTreeTest {
 
   @Test
   public void metadataLoadDirectoryWithoutInheritanceFlagKeepsUfsOtherBits() throws Exception {
-    createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
-    setDefaultAcl("/parent",
-        "default:user::rwx",
-        "default:group::---",
-        "default:other::---",
-        "default:user:tenant:r-x");
+    // sync.inherit-parent-acl defaults to true (matches POSIX default-ACL inheritance);
+    // this test pins the opt-out behavior — UFS mode wins, parent default ACL is ignored.
+    try (Closeable ignored = new ConfigurationRule(
+        PropertyKey.SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL, false,
+        Configuration.modifiableGlobal()).toResource()) {
+      createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+      setDefaultAcl("/parent",
+          "default:user::rwx",
+          "default:group::---",
+          "default:other::---",
+          "default:user:tenant:r-x");
 
-    CreateDirectoryContext metadataLoadContext = CreateDirectoryContext
-        .mergeFrom(CreateDirectoryPOptions.newBuilder().setMode(new Mode((short) 0707).toProto()))
-        .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
-    metadataLoadContext.setMetadataLoad(true, true);
-    metadataLoadContext.setWriteType(WriteType.THROUGH);
+      CreateDirectoryContext metadataLoadContext = CreateDirectoryContext
+          .mergeFrom(CreateDirectoryPOptions.newBuilder().setMode(new Mode((short) 0707).toProto()))
+          .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+      metadataLoadContext.setMetadataLoad(true, true);
+      metadataLoadContext.setWriteType(WriteType.THROUGH);
 
-    createPath(mTree, new AlluxioURI("/parent/child"), metadataLoadContext);
+      createPath(mTree, new AlluxioURI("/parent/child"), metadataLoadContext);
 
-    MutableInodeDirectory child = getInodeByPath("/parent/child").asDirectory();
-    assertEquals((short) 0707, child.getMode());
-    assertTrue(toCliStrings(child.getACL().getEntries()).contains("other::rwx"));
-    assertTrue(toCliStrings(child.getDefaultACL().getEntries()).contains("default:other::---"));
+      MutableInodeDirectory child = getInodeByPath("/parent/child").asDirectory();
+      assertEquals((short) 0707, child.getMode());
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("other::rwx"));
+      assertTrue(toCliStrings(child.getDefaultACL().getEntries()).contains("default:other::---"));
+    }
   }
 
   @Test
@@ -291,6 +297,104 @@ public final class InodeTreeTest {
       assertTrue(toCliStrings(child.getACL().getEntries()).contains("other::---"));
       assertTrue(toCliStrings(child.getACL().getEntries()).contains("user:tenant:r-x"));
       assertTrue(toCliStrings(child.getDefaultACL().getEntries()).contains("default:user:tenant:r-x"));
+    }
+  }
+
+  // Active-create regression for CSA-21972: with create-inherit-parent-acl
+  // explicitly OFF, a CreateFile with caller-mode 0600 collapses the parent's
+  // inherited named-user grant to --- (generateChildFileACL ANDs the inherited
+  // mask with the caller mode's group bits, which are 0). The flag defaults
+  // to true since this commit, so this test pins the opt-out behavior; the
+  // inheritance-on side has the matching positive test below.
+  @Test
+  public void createFileWithoutCreateInheritanceFlagMasksOutNamedUserGrant() throws Exception {
+    try (Closeable ignored = new ConfigurationRule(
+        PropertyKey.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL, false,
+        Configuration.modifiableGlobal()).toResource()) {
+      createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+      setDefaultAcl("/parent",
+          "default:user::rwx",
+          "default:group::---",
+          "default:mask::rwx",
+          "default:other::---",
+          "default:user:tenant:rwx");
+
+      CreateFileContext activeCreateContext = CreateFileContext
+          .mergeFrom(CreateFilePOptions.newBuilder()
+              .setBlockSizeBytes(Constants.KB)
+              .setMode(new Mode((short) 0600).toProto()))
+          .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+
+      createPath(mTree, new AlluxioURI("/parent/file"), activeCreateContext);
+
+      MutableInodeFile child = getInodeByPath("/parent/file").asFile();
+      // mask got ANDed with the caller's mode group-bits (0), so every named
+      // entry's effective permission is ---. trino-search couldn't write here.
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("user:tenant:rwx"));
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("mask::---"));
+    }
+  }
+
+  @Test
+  public void createFileWithCreateInheritanceFlagPreservesNamedUserGrant() throws Exception {
+    try (Closeable ignored = new ConfigurationRule(
+        PropertyKey.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL, true,
+        Configuration.modifiableGlobal()).toResource()) {
+      createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+      setDefaultAcl("/parent",
+          "default:user::rwx",
+          "default:group::---",
+          "default:mask::rwx",
+          "default:other::---",
+          "default:user:tenant:rwx");
+
+      CreateFileContext activeCreateContext = CreateFileContext
+          .mergeFrom(CreateFilePOptions.newBuilder()
+              .setBlockSizeBytes(Constants.KB)
+              .setMode(new Mode((short) 0600).toProto()))
+          .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+
+      createPath(mTree, new AlluxioURI("/parent/file"), activeCreateContext);
+
+      MutableInodeFile child = getInodeByPath("/parent/file").asFile();
+      // With inherit-on, the mask survives so tenant:rwx is effective.
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("user:tenant:rwx"));
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("mask::rwx"));
+      // other still --- via inheritance, so other-tenant access stays denied.
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("other::---"));
+    }
+  }
+
+  @Test
+  public void createDirectoryWithCreateInheritanceFlagPreservesParentAcl() throws Exception {
+    try (Closeable ignored = new ConfigurationRule(
+        PropertyKey.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL, true,
+        Configuration.modifiableGlobal()).toResource()) {
+      createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+      setDefaultAcl("/parent",
+          "default:user::rwx",
+          "default:group::---",
+          "default:mask::rwx",
+          "default:other::---",
+          "default:user:tenant:rwx");
+
+      CreateDirectoryContext activeCreateContext = CreateDirectoryContext
+          .mergeFrom(CreateDirectoryPOptions.newBuilder()
+              .setMode(new Mode((short) 0700).toProto()))
+          .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+
+      createPath(mTree, new AlluxioURI("/parent/child"), activeCreateContext);
+
+      MutableInodeDirectory child = getInodeByPath("/parent/child").asDirectory();
+      // Named-user grant + mask survive (rwx, not masked off).
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("user:tenant:rwx"));
+      assertTrue(toCliStrings(child.getACL().getEntries()).contains("mask::rwx"));
+      // And the default ACL is carried forward so the next nested create
+      // (file or dir) inherits in turn — this is the property the production
+      // CTAS smoke test needs (parquet file written two levels under the
+      // mount root).
+      assertTrue(toCliStrings(child.getDefaultACL().getEntries())
+          .contains("default:user:tenant:rwx"));
     }
   }
 
