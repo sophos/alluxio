@@ -45,7 +45,11 @@ import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.Owner;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.StorageClass;
+import software.amazon.awssdk.core.sync.RequestBody;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -85,7 +89,7 @@ public class S3AUnderFileSystemTest {
         new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
             mS3Client, mAsyncClient, BUCKET_NAME,
             mExecutor, mTransferManager,
-            UnderFileSystemConfiguration.defaults(CONF), false);
+            UnderFileSystemConfiguration.defaults(CONF), false, null);
   }
 
   @Test
@@ -200,7 +204,7 @@ public class S3AUnderFileSystemTest {
               new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
                   mS3Client, mAsyncClient, BUCKET_NAME,
                   mExecutor, mTransferManager,
-                  UnderFileSystemConfiguration.defaults(CONF), false);
+                  UnderFileSystemConfiguration.defaults(CONF), false, null);
 
       Mockito.when(mS3Client.listBuckets())
           .thenReturn(listBucketsRespWithOwner("111", "test"));
@@ -223,7 +227,7 @@ public class S3AUnderFileSystemTest {
               new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
                   mS3Client, mAsyncClient, BUCKET_NAME,
                   mExecutor, mTransferManager,
-                  UnderFileSystemConfiguration.defaults(CONF), false);
+                  UnderFileSystemConfiguration.defaults(CONF), false, null);
 
       Mockito.when(mS3Client.listBuckets())
           .thenReturn(listBucketsRespWithOwner("0", "test"));
@@ -284,5 +288,89 @@ public class S3AUnderFileSystemTest {
         .thenReturn(HeadObjectResponse.builder().contentLength(0L).build());
     // throw NPE before https://github.com/Alluxio/alluxio/pull/14641
     mS3UnderFileSystem.getObjectStatus(PATH);
+  }
+
+  @Test
+  public void resolveStorageClassUnsetReturnsNull() {
+    Assert.assertNull(
+        S3AUnderFileSystem.resolveStorageClass(UnderFileSystemConfiguration.defaults(CONF)));
+  }
+
+  @Test
+  public void resolveStorageClassWhitespaceReturnsNull() throws Exception {
+    Map<PropertyKey, Object> overrides = new HashMap<>();
+    overrides.put(PropertyKey.UNDERFS_S3_STORAGE_CLASS, "   ");
+    try (Closeable c = new ConfigurationRule(overrides, CONF).toResource()) {
+      Assert.assertNull(
+          S3AUnderFileSystem.resolveStorageClass(UnderFileSystemConfiguration.defaults(CONF)));
+    }
+  }
+
+  @Test
+  public void resolveStorageClassStandardIa() throws Exception {
+    Map<PropertyKey, Object> overrides = new HashMap<>();
+    overrides.put(PropertyKey.UNDERFS_S3_STORAGE_CLASS, "STANDARD_IA");
+    try (Closeable c = new ConfigurationRule(overrides, CONF).toResource()) {
+      Assert.assertEquals(StorageClass.STANDARD_IA,
+          S3AUnderFileSystem.resolveStorageClass(UnderFileSystemConfiguration.defaults(CONF)));
+    }
+  }
+
+  @Test
+  public void resolveStorageClassExpressOnezone() throws Exception {
+    Map<PropertyKey, Object> overrides = new HashMap<>();
+    overrides.put(PropertyKey.UNDERFS_S3_STORAGE_CLASS, "EXPRESS_ONEZONE");
+    try (Closeable c = new ConfigurationRule(overrides, CONF).toResource()) {
+      Assert.assertEquals(StorageClass.EXPRESS_ONEZONE,
+          S3AUnderFileSystem.resolveStorageClass(UnderFileSystemConfiguration.defaults(CONF)));
+    }
+  }
+
+  @Test
+  public void resolveStorageClassRejectsUnknown() throws Exception {
+    Map<PropertyKey, Object> overrides = new HashMap<>();
+    overrides.put(PropertyKey.UNDERFS_S3_STORAGE_CLASS, "DEFINITELY_NOT_A_CLASS");
+    try (Closeable c = new ConfigurationRule(overrides, CONF).toResource()) {
+      mThrown.expect(IllegalArgumentException.class);
+      mThrown.expectMessage("DEFINITELY_NOT_A_CLASS");
+      S3AUnderFileSystem.resolveStorageClass(UnderFileSystemConfiguration.defaults(CONF));
+    }
+  }
+
+  /**
+   * End-to-end check that a configured storage class lands on the {@code PutObjectRequest}
+   * issued by {@code createEmptyObject}. Covers the path that creates "directory marker"
+   * objects — the simplest write path with no streaming involved.
+   */
+  @Test
+  public void createEmptyObjectAppliesConfiguredStorageClass() {
+    S3AUnderFileSystem ufs = new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
+        mS3Client, mAsyncClient, BUCKET_NAME, mExecutor, mTransferManager,
+        UnderFileSystemConfiguration.defaults(CONF), false, StorageClass.STANDARD_IA);
+
+    Mockito.when(mS3Client.putObject(ArgumentMatchers.any(PutObjectRequest.class),
+        ArgumentMatchers.any(RequestBody.class)))
+        .thenReturn(PutObjectResponse.builder().build());
+
+    Assert.assertTrue(ufs.createEmptyObject("some/marker"));
+
+    org.mockito.ArgumentCaptor<PutObjectRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(PutObjectRequest.class);
+    Mockito.verify(mS3Client).putObject(captor.capture(), ArgumentMatchers.any(RequestBody.class));
+    Assert.assertEquals(StorageClass.STANDARD_IA, captor.getValue().storageClass());
+  }
+
+  @Test
+  public void createEmptyObjectOmitsStorageClassWhenUnconfigured() {
+    Mockito.when(mS3Client.putObject(ArgumentMatchers.any(PutObjectRequest.class),
+        ArgumentMatchers.any(RequestBody.class)))
+        .thenReturn(PutObjectResponse.builder().build());
+
+    Assert.assertTrue(mS3UnderFileSystem.createEmptyObject("some/marker"));
+
+    org.mockito.ArgumentCaptor<PutObjectRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(PutObjectRequest.class);
+    Mockito.verify(mS3Client).putObject(captor.capture(), ArgumentMatchers.any(RequestBody.class));
+    Assert.assertNull(captor.getValue().storageClass());
   }
 }

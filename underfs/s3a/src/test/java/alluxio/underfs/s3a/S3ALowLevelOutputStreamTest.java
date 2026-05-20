@@ -82,7 +82,8 @@ public class S3ALowLevelOutputStreamTest {
     mockFileAndOutputStream();
 
     sConf.set(PropertyKey.UNDERFS_S3_STREAMING_UPLOAD_PARTITION_SIZE, PARTITION_SIZE);
-    mStream = new S3ALowLevelOutputStream(BUCKET_NAME, KEY, mMockS3Client, mMockExecutor, sConf);
+    mStream = new S3ALowLevelOutputStream(BUCKET_NAME, KEY, mMockS3Client, mMockExecutor, sConf,
+        null);
   }
 
   @Test

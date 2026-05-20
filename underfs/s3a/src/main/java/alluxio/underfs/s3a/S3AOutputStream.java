@@ -20,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
+import software.amazon.awssdk.services.s3.model.StorageClass;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
 import software.amazon.awssdk.transfer.s3.model.CompletedFileUpload;
 import software.amazon.awssdk.transfer.s3.model.FileUpload;
@@ -37,6 +38,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -51,6 +53,14 @@ public class S3AOutputStream extends OutputStream implements ContentHashable {
   private static final String OCTET_STREAM = "application/octet-stream";
 
   private final boolean mSseEnabled;
+
+  /**
+   * S3 storage class for the {@link PutObjectRequest} the TransferManager wraps. {@code null}
+   * means "leave the field off the request" — the bucket default applies. Configured once via
+   * {@link S3AUnderFileSystem#mStorageClass} on stream construction.
+   */
+  @Nullable
+  private final StorageClass mStorageClass;
 
   /** Bucket name of the Alluxio S3 bucket. */
   private final String mBucketName;
@@ -84,15 +94,19 @@ public class S3AOutputStream extends OutputStream implements ContentHashable {
    * @param manager the SDK v2 transfer manager to upload the file with
    * @param tmpDirs a list of temporary directories
    * @param sseEnabled whether or not server side encryption is enabled
+   * @param storageClass S3 storage class for the wrapped PUT, or {@code null} to leave it off
+   *                     the request (bucket default applies)
    */
   public S3AOutputStream(String bucketName, String key, S3TransferManager manager,
-      List<String> tmpDirs, boolean sseEnabled) throws IOException {
+      List<String> tmpDirs, boolean sseEnabled, @Nullable StorageClass storageClass)
+      throws IOException {
     Preconditions.checkArgument(bucketName != null && !bucketName.isEmpty(), "Bucket name must "
         + "not be null or empty.");
     mBucketName = bucketName;
     mKey = key;
     mManager = manager;
     mSseEnabled = sseEnabled;
+    mStorageClass = storageClass;
     mFile = new File(PathUtils.concatPath(CommonUtils.getTmpDir(tmpDirs), UUID.randomUUID()));
     try {
       mHash = MessageDigest.getInstance("MD5");
@@ -140,6 +154,9 @@ public class S3AOutputStream extends OutputStream implements ContentHashable {
           .contentType(OCTET_STREAM);
       if (mSseEnabled) {
         reqBuilder.serverSideEncryption(ServerSideEncryption.AES256);
+      }
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
       }
       if (mHash != null) {
         reqBuilder.contentMD5(Base64.getEncoder().encodeToString(mHash.digest()));

@@ -30,6 +30,7 @@ import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.io.PathUtils;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -80,6 +81,7 @@ import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.services.s3.model.StorageClass;
 import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
 import software.amazon.awssdk.transfer.s3.model.Copy;
@@ -143,6 +145,15 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
 
     /** Whether the streaming upload is enabled. */
     private final boolean mStreamingUploadEnabled;
+
+    /**
+     * S3 storage class applied to every PUT / multipart upload / CopyObject. {@code null}
+     * means "leave it off the request" so S3 uses the bucket default — that matches both the
+     * historic Alluxio behavior and AWS's own "unspecified = STANDARD on regular buckets,
+     * EXPRESS_ONEZONE on directory buckets" semantics.
+     */
+    @Nullable
+    private final StorageClass mStorageClass;
 
     /** The permissions associated with the bucket. Fetched once and assumed to be immutable. */
     private final Supplier<ObjectPermissions> mPermissions
@@ -226,6 +237,8 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         boolean streamingUploadEnabled =
                 conf.getBoolean(PropertyKey.UNDERFS_S3_STREAMING_UPLOAD_ENABLED);
 
+        StorageClass storageClass = resolveStorageClass(conf);
+
         // v2 doesn't have an exact equivalent of v1's signer-by-string-name registry. The
         // property is rarely set in practice, so we log + ignore rather than dragging in a
         // v1 SignerFactory.
@@ -251,7 +264,34 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                 .build();
 
         return new S3AUnderFileSystem(uri, s3Client, asyncClient, bucketName,
-                service, transferManager, conf, streamingUploadEnabled);
+                service, transferManager, conf, streamingUploadEnabled, storageClass);
+    }
+
+    /**
+     * Resolves the {@link PropertyKey#UNDERFS_S3_STORAGE_CLASS} property to a v2
+     * {@link StorageClass} enum value. Returns {@code null} when unset — meaning "leave the
+     * field off the request" so S3 picks the bucket default (STANDARD on regular buckets,
+     * EXPRESS_ONEZONE on directory buckets). Rejects unknown values fail-fast with the full
+     * allowed list so misconfigurations surface at mount time, not at first write.
+     */
+    @VisibleForTesting
+    @Nullable
+    static StorageClass resolveStorageClass(UnderFileSystemConfiguration conf) {
+        if (!conf.isSet(PropertyKey.UNDERFS_S3_STORAGE_CLASS)) {
+            return null;
+        }
+        String raw = conf.getString(PropertyKey.UNDERFS_S3_STORAGE_CLASS).trim();
+        if (raw.isEmpty()) {
+            return null;
+        }
+        StorageClass resolved = StorageClass.fromValue(raw);
+        if (resolved == StorageClass.UNKNOWN_TO_SDK_VERSION) {
+            throw new IllegalArgumentException(String.format(
+                    "%s=%s is not a recognized S3 storage class. Allowed values: %s",
+                    PropertyKey.UNDERFS_S3_STORAGE_CLASS.getName(), raw,
+                    StorageClass.knownValues()));
+        }
+        return resolved;
     }
 
     /**
@@ -461,12 +501,14 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
      * @param transferManager AWS-SDK v2 transfer manager — drives multipart uploads / copies
      * @param conf configuration for this S3A ufs
      * @param streamingUploadEnabled whether streaming upload is enabled
+     * @param storageClass S3 storage class for PUT / multipart / CopyObject, or {@code null}
+     *                     to leave the field off the request (S3 bucket default applies)
      */
     protected S3AUnderFileSystem(
             AlluxioURI uri, S3Client s3Client, S3AsyncClient asyncClient,
             String bucketName, ExecutorService executor,
             S3TransferManager transferManager, UnderFileSystemConfiguration conf,
-            boolean streamingUploadEnabled) {
+            boolean streamingUploadEnabled, @Nullable StorageClass storageClass) {
         super(uri, conf);
         mS3Client = s3Client;
         mAsyncClient = asyncClient;
@@ -474,6 +516,7 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         mExecutor = MoreExecutors.listeningDecorator(executor);
         mTransferManager = transferManager;
         mStreamingUploadEnabled = streamingUploadEnabled;
+        mStorageClass = storageClass;
     }
 
     @Override
@@ -559,6 +602,9 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                 if (mUfsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED)) {
                     copyBuilder.serverSideEncryption(ServerSideEncryption.AES256);
                 }
+                if (mStorageClass != null) {
+                    copyBuilder.storageClass(mStorageClass);
+                }
                 // S3TransferManager.copy uses single-PUT for objects below 5 GB and switches to
                 // multipart upload above; that's the same threshold MULTIPART_COPY_THRESHOLD
                 // (100 MB) hint we used to give the v1 TM — the v2 TM picks its own threshold
@@ -581,14 +627,16 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     public boolean createEmptyObject(String key) {
         try {
-            mS3Client.putObject(PutObjectRequest.builder()
+            PutObjectRequest.Builder builder = PutObjectRequest.builder()
                     .bucket(mBucketName)
                     .key(key)
                     .contentLength(0L)
                     .contentMD5(DIR_HASH)
-                    .contentType("application/octet-stream")
-                    .build(),
-                RequestBody.empty());
+                    .contentType("application/octet-stream");
+            if (mStorageClass != null) {
+                builder.storageClass(mStorageClass);
+            }
+            mS3Client.putObject(builder.build(), RequestBody.empty());
             return true;
         } catch (SdkException e) {
             LOG.error("Failed to create object: {}", key, e);
@@ -599,11 +647,13 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     protected OutputStream createObject(String key) throws IOException {
         if (mStreamingUploadEnabled) {
-            return new S3ALowLevelOutputStream(mBucketName, key, mS3Client, mExecutor, mUfsConf);
+            return new S3ALowLevelOutputStream(mBucketName, key, mS3Client, mExecutor,
+                    mUfsConf, mStorageClass);
         }
         return new S3AOutputStream(mBucketName, key, mTransferManager,
                 mUfsConf.getList(PropertyKey.TMP_DIRS),
-                mUfsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED));
+                mUfsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED),
+                mStorageClass);
     }
 
     @Override

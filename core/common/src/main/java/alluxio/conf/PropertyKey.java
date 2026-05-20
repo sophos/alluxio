@@ -1584,6 +1584,19 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
                   .setScope(Scope.SERVER)
                   .build();
+  public static final PropertyKey UNDERFS_S3_STORAGE_CLASS =
+          stringBuilder(Name.UNDERFS_S3_STORAGE_CLASS)
+                  .setDescription("S3 storage class applied to objects written via this UFS "
+                          + "(PUT, multipart upload, CopyObject). Unset = use the bucket default "
+                          + "(normally STANDARD). Accepted values match Trino's s3.storage-class: "
+                          + "STANDARD, STANDARD_IA, INTELLIGENT_TIERING, ONEZONE_IA, "
+                          + "REDUCED_REDUNDANCY, GLACIER, GLACIER_IR, DEEP_ARCHIVE, OUTPOSTS, SNOW, "
+                          + "EXPRESS_ONEZONE. EXPRESS_ONEZONE is implicit on a directory bucket; "
+                          + "setting it explicitly on a regular bucket is rejected by S3 at write "
+                          + "time, not at mount time.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.WARN)
+                  .setScope(Scope.SERVER)
+                  .build();
   public static final PropertyKey UNDERFS_S3_CONNECT_TTL =
           durationBuilder(Name.UNDERFS_S3_CONNECT_TTL)
                   .setDefaultValue(-1)
@@ -7442,6 +7455,22 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setScope(Scope.MASTER)
                   .setIsDynamic(false)
                   .build();
+  public static final PropertyKey SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL =
+          booleanBuilder(Name.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL)
+                  .setDefaultValue(false)
+                  .setDescription("Whether active createFile / createDirectory should preserve a "
+                          + "parent directory's default ACL on the new child instead of letting the "
+                          + "caller's umask narrow it. Companion knob to "
+                          + "alluxio.security.authorization.sync.inherit-parent-acl, but for fresh "
+                          + "writes (not UFS metadata loads). Required when downstream POSIX "
+                          + "default-ACL entries (e.g. default:user:<tenant>:rwx) must take effect "
+                          + "on files created by external authenticated callers, since the "
+                          + "caller's CreateFileContext mode group-bits are otherwise ANDed into "
+                          + "the inherited mask and zero out every named-user grant.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
+                  .setScope(Scope.MASTER)
+                  .setIsDynamic(false)
+                  .build();
   public static final PropertyKey SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS =
           durationBuilder(Name.SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS)
                   .setAlias("alluxio.security.group.mapping.cache.timeout.ms")
@@ -8191,6 +8220,8 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.underfs.s3.server.side.encryption.enabled";
     public static final String UNDERFS_S3_SIGNER_ALGORITHM =
             "alluxio.underfs.s3.signer.algorithm";
+    public static final String UNDERFS_S3_STORAGE_CLASS =
+            "alluxio.underfs.s3.storage.class";
     public static final String UNDERFS_S3_CONNECT_TTL =
             "alluxio.underfs.s3.connection.ttl";
     public static final String UNDERFS_S3_SOCKET_TIMEOUT =
@@ -9471,6 +9502,8 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.security.authorization.permission.umask";
     public static final String SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL =
             "alluxio.security.authorization.sync.inherit-parent-acl";
+    public static final String SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL =
+            "alluxio.security.authorization.create.inherit-parent-acl";
     public static final String SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS =
             "alluxio.security.group.mapping.cache.timeout";
     public static final String SECURITY_GROUP_MAPPING_CLASS =

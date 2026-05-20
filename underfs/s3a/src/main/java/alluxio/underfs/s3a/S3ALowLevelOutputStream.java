@@ -32,6 +32,7 @@ import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
+import software.amazon.awssdk.services.s3.model.StorageClass;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
@@ -57,6 +58,13 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
 
   /** Server side encrypt enabled. */
   private final boolean mSseEnabled;
+  /**
+   * S3 storage class for every PUT / multipart init this stream issues. {@code null} means
+   * "leave the field off the request" — the bucket default applies. Configured once via
+   * {@link S3AUnderFileSystem#mStorageClass} on stream construction.
+   */
+  @Nullable
+  private final StorageClass mStorageClass;
   /** The SDK v2 S3 client to interact with S3. */
   protected S3Client mClient;
   /** Completed parts collected as each {@link #uploadPartInternal} returns. */
@@ -73,17 +81,21 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
    * @param s3Client the SDK v2 S3 client to upload the file with
    * @param executor a thread pool executor
    * @param ufsConf the object store under file system configuration
+   * @param storageClass S3 storage class for every PUT / multipart init this stream issues,
+   *                     or {@code null} to leave it off the request (bucket default applies)
    */
   public S3ALowLevelOutputStream(
       String bucketName,
       String key,
       S3Client s3Client,
       ListeningExecutorService executor,
-      AlluxioConfiguration ufsConf) {
+      AlluxioConfiguration ufsConf,
+      @Nullable StorageClass storageClass) {
     super(bucketName, key, executor,
         ufsConf.getBytes(PropertyKey.UNDERFS_S3_STREAMING_UPLOAD_PARTITION_SIZE), ufsConf);
     mClient = Preconditions.checkNotNull(s3Client);
     mSseEnabled = ufsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED);
+    mStorageClass = storageClass;
   }
 
   @Override
@@ -125,6 +137,9 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
           .contentType(OCTET_STREAM);
       if (mSseEnabled) {
         reqBuilder.serverSideEncryption(ServerSideEncryption.AES256);
+      }
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
       }
       CreateMultipartUploadResponse resp = getClient().createMultipartUpload(reqBuilder.build());
       mUploadId = resp.uploadId();
@@ -181,14 +196,15 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   @Override
   protected void createEmptyObject(String key) throws IOException {
     try {
-      PutObjectResponse resp = getClient().putObject(
-          PutObjectRequest.builder()
-              .bucket(mBucketName)
-              .key(key)
-              .contentLength(0L)
-              .contentType(OCTET_STREAM)
-              .build(),
-          RequestBody.empty());
+      PutObjectRequest.Builder reqBuilder = PutObjectRequest.builder()
+          .bucket(mBucketName)
+          .key(key)
+          .contentLength(0L)
+          .contentType(OCTET_STREAM);
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
+      }
+      PutObjectResponse resp = getClient().putObject(reqBuilder.build(), RequestBody.empty());
       mContentHash = resp.eTag();
     } catch (SdkException e) {
       throw new IOException(e);
@@ -205,6 +221,9 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
           .contentType(OCTET_STREAM);
       if (mSseEnabled) {
         reqBuilder.serverSideEncryption(ServerSideEncryption.AES256);
+      }
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
       }
       if (md5 != null) {
         reqBuilder.contentMD5(md5);
