@@ -54,17 +54,6 @@
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>apache-client</artifactId>
     </dependency>
-    <!--
-      Transitional v1 SDK dependency — used in S3AUnderFileSystem.createInstance for
-      ClientConfiguration/Protocol/Regions/RuntimeHttpUtils, which still feed into the v2
-      sync/async client builders. Phase 3 of CSA-21975 replaces those uses with the v2
-      ClientOverrideConfiguration / ApacheHttpClient / Region settings and removes this
-      dependency entirely.
-    -->
-    <dependency>
-      <groupId>com.amazonaws</groupId>
-      <artifactId>aws-java-sdk-core</artifactId>
-    </dependency>
     <!--aws sdk requires jaxb binding at runtime-->
     <dependency>
       <groupId>com.sun.xml.bind</groupId>
@@ -103,6 +92,42 @@
       <plugin>
         <groupId>com.coderplus.maven.plugins</groupId>
         <artifactId>copy-rename-maven-plugin</artifactId>
+      </plugin>
+      <!--
+        Regression guard for CSA-21975: this module is fully on AWS SDK v2 and must stay that
+        way. Any reintroduction of a direct com.amazonaws:* dependency fails the build.
+        searchTransitive=false because alluxio-core-common (provided scope) still drags a
+        transitive aws-java-sdk-core in for the EC2MetadataUtils / UpdateCheck callsites in
+        core/common/ and core/server/proxy/; those are tracked in a follow-up branch and
+        the root pom still publishes v1 dep entries for them.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>ban-aws-sdk-v1</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <searchTransitive>false</searchTransitive>
+                  <excludes>
+                    <exclude>com.amazonaws:*</exclude>
+                  </excludes>
+                  <message>
+                    The underfs/s3a module is on AWS SDK v2 only (CSA-21975).
+                    Add equivalent software.amazon.awssdk:* deps instead of com.amazonaws:*.
+                  </message>
+                </bannedDependencies>
+              </rules>
+              <fail>true</fail>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

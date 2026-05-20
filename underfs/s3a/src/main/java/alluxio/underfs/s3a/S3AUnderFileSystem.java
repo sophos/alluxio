@@ -30,10 +30,6 @@ import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.io.PathUtils;
 
-import com.amazonaws.ClientConfiguration;
-import com.amazonaws.Protocol;
-import com.amazonaws.regions.Regions;
-import com.amazonaws.util.RuntimeHttpUtils;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -46,13 +42,11 @@ import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.core.client.config.ClientAsyncConfiguration;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
-import software.amazon.awssdk.http.nio.netty.Http2Configuration;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
 import software.amazon.awssdk.http.nio.netty.ProxyConfiguration;
 import software.amazon.awssdk.regions.Region;
@@ -99,6 +93,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -215,37 +210,8 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         AwsCredentialsProvider credentials = createAwsCredentialsProvider(conf);
         String bucketName = UnderFileSystemUtils.getBucketName(uri);
 
-        // Set the client configuration based on Alluxio configuration values.
-        ClientConfiguration clientConf = new ClientConfiguration();
-
-        // Max error retry
-        if (conf.isSet(PropertyKey.UNDERFS_S3_MAX_ERROR_RETRY)) {
-            clientConf.setMaxErrorRetry(conf.getInt(PropertyKey.UNDERFS_S3_MAX_ERROR_RETRY));
-        }
-        clientConf.setConnectionTTL(conf.getMs(PropertyKey.UNDERFS_S3_CONNECT_TTL));
-        // Socket timeout
-        clientConf
-                .setSocketTimeout((int) conf.getMs(PropertyKey.UNDERFS_S3_SOCKET_TIMEOUT));
-
-        // HTTP protocol
-        if (conf.getBoolean(PropertyKey.UNDERFS_S3_SECURE_HTTP_ENABLED)
-                || conf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED)) {
-            clientConf.setProtocol(Protocol.HTTPS);
-        } else {
-            clientConf.setProtocol(Protocol.HTTP);
-        }
-
-        // Proxy host
-        if (conf.isSet(PropertyKey.UNDERFS_S3_PROXY_HOST)) {
-            clientConf.setProxyHost(conf.getString(PropertyKey.UNDERFS_S3_PROXY_HOST));
-        }
-
-        // Proxy port
-        if (conf.isSet(PropertyKey.UNDERFS_S3_PROXY_PORT)) {
-            clientConf.setProxyPort(conf.getInt(PropertyKey.UNDERFS_S3_PROXY_PORT));
-        }
-
-        // Number of metadata and I/O threads to S3.
+        // Number of metadata and I/O threads to S3. Acts as the max-connections cap for both
+        // the sync (Apache) and async (Netty) http clients below.
         int numAdminThreads = conf.getInt(PropertyKey.UNDERFS_S3_ADMIN_THREADS_MAX);
         int numTransferThreads =
                 conf.getInt(PropertyKey.UNDERFS_S3_UPLOAD_THREADS_MAX);
@@ -256,23 +222,23 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                     numThreads, numAdminThreads, numTransferThreads);
             numThreads = numAdminThreads + numTransferThreads;
         }
-        clientConf.setMaxConnections(numThreads);
-
-        // Set client request timeout for all requests since multipart copy is used,
-        // and copy parts can only be set with the client configuration.
-        clientConf
-                .setRequestTimeout((int) conf.getMs(PropertyKey.UNDERFS_S3_REQUEST_TIMEOUT));
 
         boolean streamingUploadEnabled =
                 conf.getBoolean(PropertyKey.UNDERFS_S3_STREAMING_UPLOAD_ENABLED);
 
-        // Signer algorithm
+        // v2 doesn't have an exact equivalent of v1's signer-by-string-name registry. The
+        // property is rarely set in practice, so we log + ignore rather than dragging in a
+        // v1 SignerFactory.
         if (conf.isSet(PropertyKey.UNDERFS_S3_SIGNER_ALGORITHM)) {
-            clientConf.setSignerOverride(conf.getString(PropertyKey.UNDERFS_S3_SIGNER_ALGORITHM));
+            LOG.warn("{}={} is set but is not honored by the SDK v2 client (no string-name "
+                            + "signer registry). The default v4 signer is used; configure a v2 "
+                            + "signer in code if non-default signing is required.",
+                    PropertyKey.UNDERFS_S3_SIGNER_ALGORITHM.getName(),
+                    conf.getString(PropertyKey.UNDERFS_S3_SIGNER_ALGORITHM));
         }
 
-        S3Client s3Client = createAmazonS3Sync(conf, clientConf, credentials);
-        S3AsyncClient asyncClient = createAmazonS3Async(conf, clientConf, credentials);
+        S3Client s3Client = createAmazonS3Sync(conf, credentials, numThreads);
+        S3AsyncClient asyncClient = createAmazonS3Async(conf, credentials, numThreads);
 
         ExecutorService service = ExecutorServiceFactories
                 .fixedThreadPool("alluxio-s3-transfer-manager-worker",
@@ -289,91 +255,129 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     /**
-     * Create an async S3 client.
+     * Resolves an Alluxio-configured S3 endpoint string into a {@link URI}. If the endpoint
+     * already carries a scheme it's used verbatim; otherwise {@code https://} is prepended when
+     * {@link PropertyKey#UNDERFS_S3_SECURE_HTTP_ENABLED} or
+     * {@link PropertyKey#UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED} are on, else {@code http://}.
+     * Mirrors the v1 {@code RuntimeHttpUtils.toUri} semantics in a v2-native way.
+     */
+    private static URI parseEndpointUri(String endpoint, UnderFileSystemConfiguration conf) {
+        if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+            return URI.create(endpoint);
+        }
+        boolean secure = conf.getBoolean(PropertyKey.UNDERFS_S3_SECURE_HTTP_ENABLED)
+                || conf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED);
+        return URI.create((secure ? "https" : "http") + "://" + endpoint);
+    }
+
+    /**
+     * Builds the {@link ClientOverrideConfiguration} shared by both sync and async clients —
+     * api-call timeout and max-error-retry derived from Alluxio configuration.
+     */
+    private static ClientOverrideConfiguration buildOverrideConfiguration(
+            UnderFileSystemConfiguration conf) {
+        ClientOverrideConfiguration.Builder builder = ClientOverrideConfiguration.builder();
+        long requestTimeoutMs = conf.getMs(PropertyKey.UNDERFS_S3_REQUEST_TIMEOUT);
+        // Alluxio convention: 0 means infinity. v2 treats "unset" as no timeout.
+        if (requestTimeoutMs > 0) {
+            builder.apiCallTimeout(Duration.ofMillis(requestTimeoutMs));
+        }
+        if (conf.isSet(PropertyKey.UNDERFS_S3_MAX_ERROR_RETRY)) {
+            int maxRetries = conf.getInt(PropertyKey.UNDERFS_S3_MAX_ERROR_RETRY);
+            builder.retryPolicy(p -> p.numRetries(maxRetries));
+        }
+        return builder.build();
+    }
+
+    /**
+     * Create the SDK v2 async {@link S3AsyncClient} used by async listings + the v2 transfer
+     * manager. Configuration mirrors {@link #createAmazonS3Sync} so a single set of Alluxio
+     * properties drives both clients identically.
+     *
      * @param conf the conf
-     * @param clientConf the (v1) client conf used for endpoint URI parsing
-     * @param credentialsProvider the v2 credentials provider built by
-     *        {@link #createAwsCredentialsProvider(UnderFileSystemConfiguration)} — shared with the
-     *        sync client so STS assume-role and IRSA refresh consistently across both paths
+     * @param credentialsProvider the v2 credentials provider — shared with the sync client so
+     *        STS assume-role and IRSA refresh consistently across both paths
+     * @param maxConnections cap for the netty http client's concurrency
      * @return the client
      */
     public static S3AsyncClient createAmazonS3Async(
             UnderFileSystemConfiguration conf,
-            ClientConfiguration clientConf,
-            AwsCredentialsProvider credentialsProvider) {
+            AwsCredentialsProvider credentialsProvider,
+            int maxConnections) {
 
-        S3AsyncClientBuilder clientBuilder = S3AsyncClient.builder();
-        // need to check all the additional parameters for these
-        S3Configuration.builder();
-        ClientOverrideConfiguration.builder();
-        Http2Configuration.builder();
-        ClientAsyncConfiguration.builder();
+        S3AsyncClientBuilder clientBuilder = S3AsyncClient.builder()
+                .credentialsProvider(credentialsProvider)
+                .overrideConfiguration(buildOverrideConfiguration(conf));
 
-        NettyNioAsyncHttpClient.Builder httpClientBuilder = NettyNioAsyncHttpClient.builder();
-
-        if (conf.getBoolean(PropertyKey.UNDERFS_S3_DISABLE_DNS_BUCKETS)) {
-            S3Configuration config = S3Configuration.builder()
-                    .pathStyleAccessEnabled(true)
-                    .build();
-            clientBuilder.serviceConfiguration(config);
+        NettyNioAsyncHttpClient.Builder httpClientBuilder = NettyNioAsyncHttpClient.builder()
+                .maxConcurrency(maxConnections)
+                .readTimeout(Duration.ofMillis(
+                        conf.getMs(PropertyKey.UNDERFS_S3_SOCKET_TIMEOUT)))
+                .writeTimeout(Duration.ofMillis(
+                        conf.getMs(PropertyKey.UNDERFS_S3_SOCKET_TIMEOUT)));
+        // Alluxio convention: -1 means "never expire"; v2 rejects negatives, so leave unset
+        // (which is also the SDK's "no TTL" sentinel).
+        long connectTtlMs = conf.getMs(PropertyKey.UNDERFS_S3_CONNECT_TTL);
+        if (connectTtlMs >= 0) {
+            httpClientBuilder.connectionTimeToLive(Duration.ofMillis(connectTtlMs));
         }
 
-        // Proxy host
+        if (conf.getBoolean(PropertyKey.UNDERFS_S3_DISABLE_DNS_BUCKETS)) {
+            clientBuilder.serviceConfiguration(S3Configuration.builder()
+                    .pathStyleAccessEnabled(true)
+                    .build());
+        }
+
         if (conf.isSet(PropertyKey.UNDERFS_S3_PROXY_HOST)) {
-            ProxyConfiguration.Builder proxyBuilder = ProxyConfiguration.builder();
-            proxyBuilder.host(conf.getString(PropertyKey.UNDERFS_S3_PROXY_HOST));
-            // Proxy port
+            ProxyConfiguration.Builder proxyBuilder = ProxyConfiguration.builder()
+                    .host(conf.getString(PropertyKey.UNDERFS_S3_PROXY_HOST));
             if (conf.isSet(PropertyKey.UNDERFS_S3_PROXY_PORT)) {
                 proxyBuilder.port(conf.getInt(PropertyKey.UNDERFS_S3_PROXY_PORT));
             }
             httpClientBuilder.proxyConfiguration(proxyBuilder.build());
         }
-        boolean regionSet = false;
-        if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT)) {
-            String endpoint = conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT);
-            final URI epr = RuntimeHttpUtils.toUri(endpoint, clientConf);
-            clientBuilder.endpointOverride(epr);
-            if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT_REGION)) {
-                regionSet = setRegionAsync(clientBuilder,
-                        conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT_REGION));
-            }
-        } else if (conf.isSet(PropertyKey.UNDERFS_S3_REGION)) {
-            regionSet = setRegionAsync(clientBuilder,
-                    conf.getString(PropertyKey.UNDERFS_S3_REGION));
-        }
 
-        if (!regionSet) {
-            String defaultRegion = Regions.US_EAST_1.getName();
-            clientBuilder.region(Region.of(defaultRegion));
+        if (!applyEndpointAndRegion(clientBuilder, conf)) {
+            Region defaultRegion = Region.US_EAST_1;
+            clientBuilder.region(defaultRegion);
             LOG.warn("Cannot find S3 endpoint or s3 region in Alluxio configuration, "
-                            + "set region to {} as default. S3 client v2 does not support global bucket access, "
-                            + "considering specify the region in alluxio config.",
-                    defaultRegion);
+                            + "set region to {} as default. S3 client v2 does not support global bucket "
+                            + "access, considering specify the region in alluxio config.",
+                    defaultRegion.id());
         }
         clientBuilder.httpClientBuilder(httpClientBuilder);
-        clientBuilder.credentialsProvider(credentialsProvider);
         return clientBuilder.build();
     }
 
-    private static boolean setRegionAsync(
-            S3AsyncClientBuilder builder, String region) {
-        try {
-            builder.region(Region.of(region));
-            LOG.debug("Set S3 region {} to {}", PropertyKey.UNDERFS_S3_REGION.getName(), region);
-            return true;
-        } catch (SdkClientException e) {
-            LOG.error("S3 region {} cannot be recognized, "
-                            + "fall back to use global bucket access with an extra HEAD request",
-                    region, e);
+    /**
+     * Resolves the endpoint + region for either the sync or async builder. Returns true iff a
+     * region was successfully applied.
+     */
+    private static boolean applyEndpointAndRegion(
+            software.amazon.awssdk.awscore.client.builder.AwsClientBuilder<?, ?> clientBuilder,
+            UnderFileSystemConfiguration conf) {
+        if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT)) {
+            String endpoint = conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT);
+            clientBuilder.endpointOverride(parseEndpointUri(endpoint, conf));
+            if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT_REGION)) {
+                return applyRegion(clientBuilder,
+                        conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT_REGION));
+            }
             return false;
         }
+        if (conf.isSet(PropertyKey.UNDERFS_S3_REGION)) {
+            return applyRegion(clientBuilder, conf.getString(PropertyKey.UNDERFS_S3_REGION));
+        }
+        return false;
     }
 
-    private static boolean setRegionSync(
-            S3ClientBuilder builder, String region) {
+    private static boolean applyRegion(
+            software.amazon.awssdk.awscore.client.builder.AwsClientBuilder<?, ?> clientBuilder,
+            String region) {
         try {
-            builder.region(Region.of(region));
-            LOG.debug("Set S3 region {} to {}", PropertyKey.UNDERFS_S3_REGION.getName(), region);
+            clientBuilder.region(Region.of(region));
+            LOG.debug("Set S3 region {} to {}",
+                    PropertyKey.UNDERFS_S3_REGION.getName(), region);
             return true;
         } catch (SdkClientException e) {
             LOG.error("S3 region {} cannot be recognized, "
@@ -386,32 +390,37 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     /**
      * Create the canonical SDK v2 sync {@link S3Client} used by every data-plane method
      * rewritten in Phase 2 (CSA-21975) — read path, write path, ACL.
-     * Config knobs mirror {@link #createAmazonS3Async(UnderFileSystemConfiguration,
-     * ClientConfiguration, AwsCredentialsProvider)} so a single set of Alluxio properties
-     * drives both clients identically: DNS-style addressing, proxy host/port, endpoint
-     * override, region resolution with us-east-1 fallback.
      *
      * @param conf the conf
-     * @param clientConf the (v1) client conf used for endpoint URI parsing — same shape as the
-     *        async builder so we don't have to re-parse the endpoint twice
-     * @param credentialsProvider the v2 credentials provider built by
-     *        {@link #createAwsCredentialsProvider(UnderFileSystemConfiguration)} — shared with
-     *        the async client so STS assume-role and IRSA refresh consistently across both paths
+     * @param credentialsProvider the v2 credentials provider — shared with the async client so
+     *        STS assume-role and IRSA refresh consistently across both paths
+     * @param maxConnections cap for the apache http client's connection pool
      * @return the v2 sync S3 client
      */
     public static S3Client createAmazonS3Sync(
             UnderFileSystemConfiguration conf,
-            ClientConfiguration clientConf,
-            AwsCredentialsProvider credentialsProvider) {
+            AwsCredentialsProvider credentialsProvider,
+            int maxConnections) {
 
-        S3ClientBuilder clientBuilder = S3Client.builder();
-        ApacheHttpClient.Builder httpClientBuilder = ApacheHttpClient.builder();
+        S3ClientBuilder clientBuilder = S3Client.builder()
+                .credentialsProvider(credentialsProvider)
+                .overrideConfiguration(buildOverrideConfiguration(conf));
+
+        ApacheHttpClient.Builder httpClientBuilder = ApacheHttpClient.builder()
+                .maxConnections(maxConnections)
+                .socketTimeout(Duration.ofMillis(
+                        conf.getMs(PropertyKey.UNDERFS_S3_SOCKET_TIMEOUT)));
+        // Alluxio convention: -1 means "never expire"; v2 rejects negatives, so leave unset
+        // (which is also the SDK's "no TTL" sentinel).
+        long syncConnectTtlMs = conf.getMs(PropertyKey.UNDERFS_S3_CONNECT_TTL);
+        if (syncConnectTtlMs >= 0) {
+            httpClientBuilder.connectionTimeToLive(Duration.ofMillis(syncConnectTtlMs));
+        }
 
         if (conf.getBoolean(PropertyKey.UNDERFS_S3_DISABLE_DNS_BUCKETS)) {
-            S3Configuration config = S3Configuration.builder()
+            clientBuilder.serviceConfiguration(S3Configuration.builder()
                     .pathStyleAccessEnabled(true)
-                    .build();
-            clientBuilder.serviceConfiguration(config);
+                    .build());
         }
 
         if (conf.isSet(PropertyKey.UNDERFS_S3_PROXY_HOST)) {
@@ -422,38 +431,22 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                     ? conf.getInt(PropertyKey.UNDERFS_S3_PROXY_PORT)
                     : -1;
             // Apache's ProxyConfiguration only accepts an endpoint URI, not host+port directly.
-            String scheme = "http";
             URI proxyUri = proxyPort > 0
-                    ? URI.create(scheme + "://" + proxyHost + ":" + proxyPort)
-                    : URI.create(scheme + "://" + proxyHost);
+                    ? URI.create("http://" + proxyHost + ":" + proxyPort)
+                    : URI.create("http://" + proxyHost);
             proxyBuilder.endpoint(proxyUri);
             httpClientBuilder.proxyConfiguration(proxyBuilder.build());
         }
 
-        boolean regionSet = false;
-        if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT)) {
-            String endpoint = conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT);
-            final URI epr = RuntimeHttpUtils.toUri(endpoint, clientConf);
-            clientBuilder.endpointOverride(epr);
-            if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT_REGION)) {
-                regionSet = setRegionSync(clientBuilder,
-                        conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT_REGION));
-            }
-        } else if (conf.isSet(PropertyKey.UNDERFS_S3_REGION)) {
-            regionSet = setRegionSync(clientBuilder,
-                    conf.getString(PropertyKey.UNDERFS_S3_REGION));
-        }
-
-        if (!regionSet) {
-            String defaultRegion = Regions.US_EAST_1.getName();
-            clientBuilder.region(Region.of(defaultRegion));
+        if (!applyEndpointAndRegion(clientBuilder, conf)) {
+            Region defaultRegion = Region.US_EAST_1;
+            clientBuilder.region(defaultRegion);
             LOG.warn("Cannot find S3 endpoint or s3 region in Alluxio configuration, "
                             + "set region to {} as default. S3 client v2 does not support global "
                             + "bucket access, considering specify the region in alluxio config.",
-                    defaultRegion);
+                    defaultRegion.id());
         }
         clientBuilder.httpClientBuilder(httpClientBuilder);
-        clientBuilder.credentialsProvider(credentialsProvider);
         return clientBuilder.build();
     }
 
