@@ -702,9 +702,9 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     protected OutputStream createObject(String key) throws IOException {
         if (mStreamingUploadEnabled) {
-            return new S3ALowLevelOutputStream(mBucketName, key, mClient, mExecutor, mUfsConf);
+            return new S3ALowLevelOutputStream(mBucketName, key, mS3Client, mExecutor, mUfsConf);
         }
-        return new S3AOutputStream(mBucketName, key, mManager,
+        return new S3AOutputStream(mBucketName, key, mTransferManager,
                 mUfsConf.getList(PropertyKey.TMP_DIRS),
                 mUfsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED));
     }
