@@ -24,10 +24,8 @@ import alluxio.underfs.options.DeleteOptions;
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.model.AccessControlList;
 import com.amazonaws.services.s3.model.ListObjectsV2Request;
 import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.model.Owner;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import org.junit.Assert;
@@ -45,9 +43,13 @@ import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
+import software.amazon.awssdk.services.s3.model.GetBucketAclRequest;
+import software.amazon.awssdk.services.s3.model.GetBucketAclResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
+import software.amazon.awssdk.services.s3.model.Owner;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.Closeable;
@@ -170,19 +172,28 @@ public class S3AUnderFileSystemTest {
     }
   }
 
+  private static ListBucketsResponse listBucketsRespWithOwner(String id, String displayName) {
+    return ListBucketsResponse.builder()
+        .owner(Owner.builder().id(id).displayName(displayName).build())
+        .build();
+  }
+
   @Test
   public void getPermissionsCached() {
-    Mockito.when(mClient.getS3AccountOwner()).thenReturn(new Owner("0", "test"));
-    Mockito.when(mClient.getBucketAcl(Mockito.anyString())).thenReturn(new AccessControlList());
+    Mockito.when(mS3Client.listBuckets())
+        .thenReturn(listBucketsRespWithOwner("0", "test"));
+    Mockito.when(mS3Client.getBucketAcl(Mockito.any(GetBucketAclRequest.class)))
+        .thenReturn(GetBucketAclResponse.builder().build());
     mS3UnderFileSystem.getPermissions();
     mS3UnderFileSystem.getPermissions();
-    Mockito.verify(mClient).getS3AccountOwner();
-    Mockito.verify(mClient).getBucketAcl(Mockito.anyString());
+    Mockito.verify(mS3Client).listBuckets();
+    Mockito.verify(mS3Client).getBucketAcl(Mockito.any(GetBucketAclRequest.class));
   }
 
   @Test
   public void getPermissionsDefault() {
-    Mockito.when(mClient.getS3AccountOwner()).thenThrow(AmazonClientException.class);
+    Mockito.when(mS3Client.listBuckets())
+        .thenThrow(SdkException.builder().message("boom").build());
     ObjectUnderFileSystem.ObjectPermissions permissions = mS3UnderFileSystem.getPermissions();
     Assert.assertEquals(DEFAULT_OWNER, permissions.getGroup());
     Assert.assertEquals(DEFAULT_OWNER, permissions.getOwner());
@@ -200,8 +211,10 @@ public class S3AUnderFileSystemTest {
                   mExecutor, mManager, mV2TransferManager,
                   UnderFileSystemConfiguration.defaults(CONF), false);
 
-      Mockito.when(mClient.getS3AccountOwner()).thenReturn(new Owner("111", "test"));
-      Mockito.when(mClient.getBucketAcl(Mockito.anyString())).thenReturn(new AccessControlList());
+      Mockito.when(mS3Client.listBuckets())
+          .thenReturn(listBucketsRespWithOwner("111", "test"));
+      Mockito.when(mS3Client.getBucketAcl(Mockito.any(GetBucketAclRequest.class)))
+          .thenReturn(GetBucketAclResponse.builder().build());
       ObjectUnderFileSystem.ObjectPermissions permissions = s3UnderFileSystem.getPermissions();
 
       Assert.assertEquals("altname", permissions.getOwner());
@@ -221,8 +234,10 @@ public class S3AUnderFileSystemTest {
                   mExecutor, mManager, mV2TransferManager,
                   UnderFileSystemConfiguration.defaults(CONF), false);
 
-      Mockito.when(mClient.getS3AccountOwner()).thenReturn(new Owner("0", "test"));
-      Mockito.when(mClient.getBucketAcl(Mockito.anyString())).thenReturn(new AccessControlList());
+      Mockito.when(mS3Client.listBuckets())
+          .thenReturn(listBucketsRespWithOwner("0", "test"));
+      Mockito.when(mS3Client.getBucketAcl(Mockito.any(GetBucketAclRequest.class)))
+          .thenReturn(GetBucketAclResponse.builder().build());
       ObjectUnderFileSystem.ObjectPermissions permissions = s3UnderFileSystem.getPermissions();
 
       Assert.assertEquals("test", permissions.getOwner());

@@ -45,12 +45,10 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.internal.ServiceUtils;
-import com.amazonaws.services.s3.model.AccessControlList;
 import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ListObjectsV2Request;
 import com.amazonaws.services.s3.model.ListObjectsV2Result;
 import com.amazonaws.services.s3.model.ObjectListing;
-import com.amazonaws.services.s3.model.Owner;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
@@ -90,8 +88,11 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.DeletedObject;
+import software.amazon.awssdk.services.s3.model.GetBucketAclRequest;
+import software.amazon.awssdk.services.s3.model.GetBucketAclResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
@@ -1199,21 +1200,27 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         // if ACL enabled try to inherit bucket acl for all the objects.
         if (mUfsConf.getBoolean(PropertyKey.UNDERFS_S3_INHERIT_ACL)) {
             try {
-                Owner owner = mClient.getS3AccountOwner();
-                AccessControlList acl = mClient.getBucketAcl(mBucketName);
+                // v2 has no direct equivalent of v1's getS3AccountOwner() — the v1 call
+                // is internally a ListBuckets and reads back the canonical Owner. We do
+                // the same explicitly; the s3:ListAllMyBuckets grant required by v1
+                // continues to be the relevant IAM action for this code path.
+                ListBucketsResponse listResp = mS3Client.listBuckets();
+                software.amazon.awssdk.services.s3.model.Owner owner = listResp.owner();
+                GetBucketAclResponse acl = mS3Client.getBucketAcl(
+                        GetBucketAclRequest.builder().bucket(mBucketName).build());
 
-                bucketMode = S3AUtils.translateBucketAcl(acl, owner.getId());
+                bucketMode = S3AUtils.translateBucketAcl(acl, owner.id());
                 if (mUfsConf.isSet(PropertyKey.UNDERFS_S3_OWNER_ID_TO_USERNAME_MAPPING)) {
                     // Here accountOwner can be null if there is no mapping set for this owner id
                     accountOwner = CommonUtils.getValueFromStaticMapping(
                             mUfsConf.getString(PropertyKey.UNDERFS_S3_OWNER_ID_TO_USERNAME_MAPPING),
-                            owner.getId());
+                            owner.id());
                 }
                 if (accountOwner == null || accountOwner.equals(DEFAULT_OWNER)) {
                     // If there is no user-defined mapping, use display name or id.
-                    accountOwner = owner.getDisplayName() != null ? owner.getDisplayName() : owner.getId();
+                    accountOwner = owner.displayName() != null ? owner.displayName() : owner.id();
                 }
-            } catch (AmazonClientException e) {
+            } catch (SdkException e) {
                 LOG.warn("Failed to inherit bucket ACLs, proceeding with defaults. {}", e.toString());
             }
         }
