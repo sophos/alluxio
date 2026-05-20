@@ -7434,10 +7434,28 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .build();
   public static final PropertyKey SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL =
           booleanBuilder(Name.SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL)
-                  .setDefaultValue(false)
+                  .setDefaultValue(true)
                   .setDescription("Whether metadata sync should preserve a parent directory's "
                           + "inherited ACL on newly materialized children instead of reopening access "
-                          + "from the UFS mode.")
+                          + "from the UFS mode. Default on — matches POSIX default-ACL inheritance "
+                          + "semantics; clear to fall back to UFS-mode-driven children.")
+                  .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
+                  .setScope(Scope.MASTER)
+                  .setIsDynamic(false)
+                  .build();
+  public static final PropertyKey SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL =
+          booleanBuilder(Name.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL)
+                  .setDefaultValue(true)
+                  .setDescription("Whether active createFile / createDirectory should preserve a "
+                          + "parent directory's default ACL on the new child instead of letting the "
+                          + "caller's umask narrow it. Companion knob to "
+                          + "alluxio.security.authorization.sync.inherit-parent-acl, but for fresh "
+                          + "writes (not UFS metadata loads). Required when downstream POSIX "
+                          + "default-ACL entries (e.g. default:user:<tenant>:rwx) must take effect "
+                          + "on files created by external authenticated callers, since the "
+                          + "caller's CreateFileContext mode group-bits are otherwise ANDed into "
+                          + "the inherited mask and zero out every named-user grant. Default on — "
+                          + "matches POSIX default-ACL inheritance semantics.")
                   .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
                   .setScope(Scope.MASTER)
                   .setIsDynamic(false)
@@ -9471,6 +9489,8 @@ public final class PropertyKey implements Comparable<PropertyKey> {
             "alluxio.security.authorization.permission.umask";
     public static final String SECURITY_AUTHORIZATION_SYNC_INHERIT_PARENT_ACL =
             "alluxio.security.authorization.sync.inherit-parent-acl";
+    public static final String SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL =
+            "alluxio.security.authorization.create.inherit-parent-acl";
     public static final String SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS =
             "alluxio.security.group.mapping.cache.timeout";
     public static final String SECURITY_GROUP_MAPPING_CLASS =
