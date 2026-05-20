@@ -25,14 +25,6 @@ import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.UnderFileSystemTestUtil;
 import alluxio.underfs.options.ListOptions;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.regions.Regions;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.services.s3.transfer.TransferManager;
 import com.google.common.collect.Iterators;
 import org.apache.commons.io.IOUtils;
 import org.gaul.s3proxy.junit.S3ProxyRule;
@@ -47,7 +39,10 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
 
 import java.io.IOException;
@@ -70,7 +65,7 @@ public class S3AUnderFileSystemMockServerTest {
   private static final String TEST_CONTENT = "test_content";
 
   private S3AUnderFileSystem mS3UnderFileSystem;
-  private AmazonS3 mClient;
+  private S3Client mSyncClient;
 
   @Rule
   public S3ProxyRule mS3Proxy = S3ProxyRule.builder()
@@ -84,31 +79,21 @@ public class S3AUnderFileSystemMockServerTest {
   public final ExpectedException mThrown = ExpectedException.none();
 
   @Before
-  public void before() throws AmazonClientException {
-    AwsClientBuilder.EndpointConfiguration
-        endpoint = new AwsClientBuilder.EndpointConfiguration(
-        "http://localhost:8001", "us-west-2");
-    mClient = AmazonS3ClientBuilder
-        .standard()
-        .withPathStyleAccessEnabled(true)
-        .withCredentials(
-            new AWSStaticCredentialsProvider(
-                new BasicAWSCredentials(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
-        .withEndpointConfiguration(
-            new AwsClientBuilder.EndpointConfiguration(mS3Proxy.getUri().toString(),
-                Regions.US_WEST_2.getName()))
-        .build();
+  public void before() {
     StaticCredentialsProvider v2Creds = StaticCredentialsProvider.create(
         AwsBasicCredentials.create(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey()));
+    // S3Proxy doesn't honor a LocationConstraint header on CreateBucket. SDK v2 only adds that
+    // header when the client region is something other than us-east-1, so pin the test clients
+    // (and the seed-bucket call) to us-east-1.
     S3AsyncClient asyncClient = S3AsyncClient.builder()
         .credentialsProvider(v2Creds)
         .endpointOverride(mS3Proxy.getUri())
-        .region(Region.US_WEST_2)
+        .region(Region.US_EAST_1)
         .build();
-    S3Client syncClient = S3Client.builder()
+    mSyncClient = S3Client.builder()
         .credentialsProvider(v2Creds)
         .endpointOverride(mS3Proxy.getUri())
-        .region(Region.US_WEST_2)
+        .region(Region.US_EAST_1)
         .serviceConfiguration(S3Configuration.builder()
             .pathStyleAccessEnabled(true)
             // S3Proxy (jclouds backend) returns 501 on requests carrying SDK v2's default
@@ -116,25 +101,31 @@ public class S3AUnderFileSystemMockServerTest {
             .checksumValidationEnabled(false)
             .build())
         .build();
-    mClient.createBucket(TEST_BUCKET);
+    mSyncClient.createBucket(CreateBucketRequest.builder().bucket(TEST_BUCKET).build());
 
-    S3TransferManager v2TransferManager = S3TransferManager.builder()
+    S3TransferManager transferManager = S3TransferManager.builder()
         .s3Client(asyncClient).build();
     mS3UnderFileSystem =
-        new S3AUnderFileSystem(new AlluxioURI("s3://" + TEST_BUCKET), mClient,
-            syncClient, asyncClient, TEST_BUCKET,
-            Executors.newSingleThreadExecutor(), new TransferManager(), v2TransferManager,
+        new S3AUnderFileSystem(new AlluxioURI("s3://" + TEST_BUCKET),
+            mSyncClient, asyncClient, TEST_BUCKET,
+            Executors.newSingleThreadExecutor(), transferManager,
             UnderFileSystemConfiguration.defaults(CONF), false);
   }
 
   @After
   public void after() {
-    mClient = null;
+    mSyncClient = null;
+  }
+
+  private void putString(String key, String content) {
+    mSyncClient.putObject(
+        PutObjectRequest.builder().bucket(TEST_BUCKET).key(key).build(),
+        RequestBody.fromString(content));
   }
 
   @Test
   public void read() throws IOException {
-    mClient.putObject(TEST_BUCKET, TEST_FILE, TEST_CONTENT);
+    putString(TEST_FILE, TEST_CONTENT);
 
     InputStream is =
         mS3UnderFileSystem.open(TEST_FILE_URI.getPath());
@@ -143,15 +134,15 @@ public class S3AUnderFileSystemMockServerTest {
 
   @Test
   public void nestedDirectory() throws Throwable {
-    mClient.putObject(TEST_BUCKET, "d1/d1/f1", TEST_CONTENT);
-    mClient.putObject(TEST_BUCKET, "d1/d1/f2", TEST_CONTENT);
-    mClient.putObject(TEST_BUCKET, "d1/d2/f1", TEST_CONTENT);
-    mClient.putObject(TEST_BUCKET, "d2/d1/f1", TEST_CONTENT);
-    mClient.putObject(TEST_BUCKET, "d3/", "");
-    mClient.putObject(TEST_BUCKET, "d4/", "");
-    mClient.putObject(TEST_BUCKET, "d4/f1", TEST_CONTENT);
-    mClient.putObject(TEST_BUCKET, "f1", TEST_CONTENT);
-    mClient.putObject(TEST_BUCKET, "f2", TEST_CONTENT);
+    putString("d1/d1/f1", TEST_CONTENT);
+    putString("d1/d1/f2", TEST_CONTENT);
+    putString("d1/d2/f1", TEST_CONTENT);
+    putString("d2/d1/f1", TEST_CONTENT);
+    putString("d3/", "");
+    putString("d4/", "");
+    putString("d4/f1", TEST_CONTENT);
+    putString("f1", TEST_CONTENT);
+    putString("f2", TEST_CONTENT);
 
     /*
       Objects:
@@ -230,7 +221,7 @@ public class S3AUnderFileSystemMockServerTest {
     for (int i = 0; i < 5; ++i) {
       for (int j = 0; j < 5; ++j) {
         for (int k = 0; k < 5; ++k) {
-          mClient.putObject(TEST_BUCKET, String.format("%d/%d/%d", i, j, k), TEST_CONTENT);
+          putString(String.format("%d/%d/%d", i, j, k), TEST_CONTENT);
         }
       }
     }

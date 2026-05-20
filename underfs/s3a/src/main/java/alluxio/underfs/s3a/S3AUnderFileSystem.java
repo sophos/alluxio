@@ -30,25 +30,9 @@ import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.io.PathUtils;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.AmazonServiceException;
 import com.amazonaws.ClientConfiguration;
 import com.amazonaws.Protocol;
-import com.amazonaws.SdkClientException;
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.auth.AWSCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.auth.BasicSessionCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
 import com.amazonaws.regions.Regions;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.services.s3.internal.ServiceUtils;
-import com.amazonaws.services.s3.transfer.TransferManager;
-import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
-import com.amazonaws.util.AwsHostNameUtils;
-import com.amazonaws.util.Base64;
 import com.amazonaws.util.RuntimeHttpUtils;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ListeningExecutorService;
@@ -64,6 +48,7 @@ import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientAsyncConfiguration;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
@@ -116,7 +101,7 @@ import java.io.OutputStream;
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Date;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -141,20 +126,15 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     /** Static hash for a directory's empty contents. */
     private static final String DIR_HASH;
 
-    /** Threshold to do multipart copy. */
-    private static final long MULTIPART_COPY_THRESHOLD = 100L * Constants.MB;
-
     /** Default owner of objects if owner cannot be determined. */
     private static final String DEFAULT_OWNER = "";
 
     private static final String S3_SERVICE_NAME = "s3";
 
-    /** AWS-SDK v1 S3 client. Removed in Phase 2.4 (CSA-21975). */
-    private final AmazonS3 mClient;
-
     /** AWS-SDK v2 sync S3 client. Drives every data-plane method from Phase 2 onwards. */
     private final S3Client mS3Client;
 
+    /** AWS-SDK v2 async S3 client — drives async listings and backs the v2 transfer manager. */
     private final S3AsyncClient mAsyncClient;
 
     /** Bucket name of user's configured Alluxio bucket. */
@@ -162,9 +142,6 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
 
     /** Executor for executing upload tasks in streaming upload. */
     private final ListeningExecutorService mExecutor;
-
-    /** AWS-SDK v1 Transfer Manager. Removed in Phase 2.4 (CSA-21975). */
-    private final TransferManager mManager;
 
     /** AWS-SDK v2 S3 Transfer Manager — drives {@link S3AOutputStream} multipart uploads. */
     private final S3TransferManager mTransferManager;
@@ -178,7 +155,7 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
 
     static {
         byte[] dirByteHash = DigestUtils.md5(new byte[0]);
-        DIR_HASH = new String(Base64.encode(dirByteHash));
+        DIR_HASH = new String(Base64.getEncoder().encode(dirByteHash));
     }
 
     /**
@@ -223,33 +200,6 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                     .build();
         }
         return base;
-    }
-
-    /**
-     * Bridges an SDK v2 {@link AwsCredentialsProvider} into the v1 {@link AWSCredentialsProvider}
-     * interface so the still-v1 sync {@link AmazonS3} client can be built from the canonical v2
-     * credentials. Deleted at the end of Phase 2 (CSA-21975) once the v1 sync client is gone.
-     */
-    private static AWSCredentialsProvider wrapV2CredentialsForV1Client(
-            AwsCredentialsProvider v2Provider) {
-        return new AWSCredentialsProvider() {
-            @Override
-            public AWSCredentials getCredentials() {
-                software.amazon.awssdk.auth.credentials.AwsCredentials c =
-                        v2Provider.resolveCredentials();
-                if (c instanceof AwsSessionCredentials) {
-                    AwsSessionCredentials sc = (AwsSessionCredentials) c;
-                    return new BasicSessionCredentials(
-                            sc.accessKeyId(), sc.secretAccessKey(), sc.sessionToken());
-                }
-                return new BasicAWSCredentials(c.accessKeyId(), c.secretAccessKey());
-            }
-
-            @Override
-            public void refresh() {
-                // v2 providers refresh themselves; nothing to do here.
-            }
-        };
     }
 
     /**
@@ -321,12 +271,6 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
             clientConf.setSignerOverride(conf.getString(PropertyKey.UNDERFS_S3_SIGNER_ALGORITHM));
         }
 
-        AwsClientBuilder.EndpointConfiguration endpointConfiguration
-                = createEndpointConfiguration(conf, clientConf);
-
-        AmazonS3 amazonS3Client = createAmazonS3(
-                wrapV2CredentialsForV1Client(credentials),
-                clientConf, endpointConfiguration, conf);
         S3Client s3Client = createAmazonS3Sync(conf, clientConf, credentials);
         S3AsyncClient asyncClient = createAmazonS3Async(conf, clientConf, credentials);
 
@@ -334,20 +278,14 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                 .fixedThreadPool("alluxio-s3-transfer-manager-worker",
                         numTransferThreads).create();
 
-        TransferManager transferManager = TransferManagerBuilder.standard()
-                .withS3Client(amazonS3Client)
-                .withExecutorFactory(() -> service)
-                .withMultipartCopyThreshold(MULTIPART_COPY_THRESHOLD)
-                .build();
-
         // The v2 transfer manager piggybacks on the existing async client. We don't size its
         // internal executor — the SDK defaults pick a sensible bounded thread pool.
-        S3TransferManager v2TransferManager = S3TransferManager.builder()
+        S3TransferManager transferManager = S3TransferManager.builder()
                 .s3Client(asyncClient)
                 .build();
 
-        return new S3AUnderFileSystem(uri, amazonS3Client, s3Client, asyncClient, bucketName,
-                service, transferManager, v2TransferManager, conf, streamingUploadEnabled);
+        return new S3AUnderFileSystem(uri, s3Client, asyncClient, bucketName,
+                service, transferManager, conf, streamingUploadEnabled);
     }
 
     /**
@@ -520,121 +458,28 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     /**
-     * Create an AmazonS3 client.
-     *
-     * @param credentialsProvider the credential provider
-     * @param clientConf the client config
-     * @param endpointConfiguration the endpoint config
-     * @param conf the Ufs config
-     * @return the AmazonS3 client
-     */
-    public static AmazonS3 createAmazonS3(AWSCredentialsProvider credentialsProvider,
-                                          ClientConfiguration clientConf,
-                                          AwsClientBuilder.EndpointConfiguration endpointConfiguration,
-                                          UnderFileSystemConfiguration conf) {
-        AmazonS3ClientBuilder clientBuilder = AmazonS3Client.builder()
-                .withCredentials(credentialsProvider)
-                .withClientConfiguration(clientConf);
-
-        if (conf.getBoolean(PropertyKey.UNDERFS_S3_DISABLE_DNS_BUCKETS)) {
-            clientBuilder.withPathStyleAccessEnabled(true);
-        }
-
-        boolean enableGlobalBucketAccess = true;
-        if (endpointConfiguration != null) {
-            clientBuilder.withEndpointConfiguration(endpointConfiguration);
-            enableGlobalBucketAccess = false;
-        } else if (conf.isSet(PropertyKey.UNDERFS_S3_REGION)) {
-            try {
-                String region = conf.getString(PropertyKey.UNDERFS_S3_REGION);
-                clientBuilder.withRegion(region);
-                enableGlobalBucketAccess = false;
-                LOG.debug("Set S3 region {} to {}", PropertyKey.UNDERFS_S3_REGION.getName(), region);
-            } catch (SdkClientException e) {
-                LOG.error("S3 region {} cannot be recognized, "
-                                + "fall back to use global bucket access with an extra HEAD request",
-                        conf.getString(PropertyKey.UNDERFS_S3_REGION), e);
-            }
-        }
-
-        if (enableGlobalBucketAccess) {
-            // access bucket without region information
-            // at the cost of an extra HEAD request
-            clientBuilder.withForceGlobalBucketAccessEnabled(true);
-            // The special S3 region which can be used to talk to any bucket
-            // Region is required even if global bucket access enabled
-            String defaultRegion = Regions.US_EAST_1.getName();
-            clientBuilder.setRegion(defaultRegion);
-            LOG.debug("Cannot find S3 endpoint or s3 region in Alluxio configuration, "
-                            + "set region to {} and enable global bucket access with extra overhead",
-                    defaultRegion);
-        }
-        return clientBuilder.build();
-    }
-
-    /**
-     * Creates an endpoint configuration.
-     *
-     * @param conf the aluxio conf
-     * @param clientConf the aws conf
-     * @return the endpoint configuration
-     */
-    @Nullable
-    private static AwsClientBuilder.EndpointConfiguration createEndpointConfiguration(
-            UnderFileSystemConfiguration conf, ClientConfiguration clientConf) {
-        if (!conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT)) {
-            LOG.debug("No endpoint configuration generated, using default s3 endpoint");
-            return null;
-        }
-        String endpoint = conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT);
-        final URI epr = RuntimeHttpUtils.toUri(endpoint, clientConf);
-        LOG.debug("Creating endpoint configuration for {}", epr);
-
-        String region;
-        if (conf.isSet(PropertyKey.UNDERFS_S3_ENDPOINT_REGION)) {
-            region = conf.getString(PropertyKey.UNDERFS_S3_ENDPOINT_REGION);
-        } else if (ServiceUtils.isS3USStandardEndpoint(endpoint)) {
-            // endpoint is standard s3 endpoint with default region, no need to set region
-            LOG.debug("Standard s3 endpoint, declare region as null");
-            region = null;
-        } else {
-            LOG.debug("Parsing region fom non-standard s3 endpoint");
-            region = AwsHostNameUtils.parseRegion(
-                    epr.getHost(),
-                    S3_SERVICE_NAME);
-        }
-        LOG.debug("Region for endpoint {}, URI {} is determined as {}",
-                endpoint, epr, region);
-        return new AwsClientBuilder.EndpointConfiguration(endpoint, region);
-    }
-
-    /**
      * Constructor for {@link S3AUnderFileSystem}.
      *
      * @param uri the {@link AlluxioURI} for this UFS
-     * @param amazonS3Client AWS-SDK v1 S3 client (Phase 2.4 of CSA-21975 removes this param)
      * @param s3Client AWS-SDK v2 sync S3 client — drives every method rewritten in Phase 2
-     * @param asyncClient AWS-SDK v2 async S3 client — drives the listing path
+     * @param asyncClient AWS-SDK v2 async S3 client — drives the async listing path
      * @param bucketName bucket name of user's configured Alluxio bucket
      * @param executor the executor for executing upload tasks
-     * @param transferManager AWS-SDK v1 transfer manager (Phase 2.4 of CSA-21975 removes this param)
-     * @param v2TransferManager AWS-SDK v2 transfer manager — drives multipart uploads
+     * @param transferManager AWS-SDK v2 transfer manager — drives multipart uploads / copies
      * @param conf configuration for this S3A ufs
      * @param streamingUploadEnabled whether streaming upload is enabled
      */
     protected S3AUnderFileSystem(
-            AlluxioURI uri, AmazonS3 amazonS3Client, S3Client s3Client, S3AsyncClient asyncClient,
-            String bucketName, ExecutorService executor, TransferManager transferManager,
-            S3TransferManager v2TransferManager, UnderFileSystemConfiguration conf,
+            AlluxioURI uri, S3Client s3Client, S3AsyncClient asyncClient,
+            String bucketName, ExecutorService executor,
+            S3TransferManager transferManager, UnderFileSystemConfiguration conf,
             boolean streamingUploadEnabled) {
         super(uri, conf);
-        mClient = amazonS3Client;
         mS3Client = s3Client;
         mAsyncClient = asyncClient;
         mBucketName = bucketName;
         mExecutor = MoreExecutors.listeningDecorator(executor);
-        mManager = transferManager;
-        mTransferManager = v2TransferManager;
+        mTransferManager = transferManager;
         mStreamingUploadEnabled = streamingUploadEnabled;
     }
 

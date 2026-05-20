@@ -21,9 +21,6 @@ import alluxio.underfs.UfsMode;
 import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.options.DeleteOptions;
 
-import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.transfer.TransferManager;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import org.junit.Assert;
 import org.junit.Before;
@@ -70,28 +67,24 @@ public class S3AUnderFileSystemTest {
   private static final short DEFAULT_MODE = 0700;
 
   private S3AUnderFileSystem mS3UnderFileSystem;
-  private AmazonS3Client mClient;
   private S3Client mS3Client;
   private S3AsyncClient mAsyncClient;
   private ListeningExecutorService mExecutor;
-  private TransferManager mManager;
-  private S3TransferManager mV2TransferManager;
+  private S3TransferManager mTransferManager;
 
   @Rule
   public final ExpectedException mThrown = ExpectedException.none();
 
   @Before
   public void before() {
-    mClient = Mockito.mock(AmazonS3Client.class);
     mS3Client = Mockito.mock(S3Client.class);
     mExecutor = Mockito.mock(ListeningExecutorService.class);
-    mManager = Mockito.mock(TransferManager.class);
-    mV2TransferManager = Mockito.mock(S3TransferManager.class);
+    mTransferManager = Mockito.mock(S3TransferManager.class);
     mAsyncClient = Mockito.mock(S3AsyncClient.class);
     mS3UnderFileSystem =
         new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
-            mClient, mS3Client, mAsyncClient, BUCKET_NAME,
-            mExecutor, mManager, mV2TransferManager,
+            mS3Client, mAsyncClient, BUCKET_NAME,
+            mExecutor, mTransferManager,
             UnderFileSystemConfiguration.defaults(CONF), false);
   }
 
@@ -204,9 +197,9 @@ public class S3AUnderFileSystemTest {
     conf.put(PropertyKey.UNDERFS_S3_OWNER_ID_TO_USERNAME_MAPPING, "111=altname");
     try (Closeable c = new ConfigurationRule(conf, CONF).toResource()) {
       S3AUnderFileSystem s3UnderFileSystem =
-              new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME), mClient,
+              new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
                   mS3Client, mAsyncClient, BUCKET_NAME,
-                  mExecutor, mManager, mV2TransferManager,
+                  mExecutor, mTransferManager,
                   UnderFileSystemConfiguration.defaults(CONF), false);
 
       Mockito.when(mS3Client.listBuckets())
@@ -228,8 +221,8 @@ public class S3AUnderFileSystemTest {
     try (Closeable c = new ConfigurationRule(conf, CONF).toResource()) {
       S3AUnderFileSystem s3UnderFileSystem =
               new S3AUnderFileSystem(new AlluxioURI("s3a://" + BUCKET_NAME),
-                  mClient, mS3Client, mAsyncClient, BUCKET_NAME,
-                  mExecutor, mManager, mV2TransferManager,
+                  mS3Client, mAsyncClient, BUCKET_NAME,
+                  mExecutor, mTransferManager,
                   UnderFileSystemConfiguration.defaults(CONF), false);
 
       Mockito.when(mS3Client.listBuckets())

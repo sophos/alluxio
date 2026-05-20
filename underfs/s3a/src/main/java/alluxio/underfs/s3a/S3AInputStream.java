@@ -28,8 +28,8 @@ import javax.annotation.concurrent.NotThreadSafe;
 
 /**
  * A wrapper around an SDK v2 {@link ResponseInputStream} which handles skips by reopening at
- * the new position. Rewritten on the SDK v2 sync client in Phase 2.1 (CSA-21975); the previous
- * v1 {@link com.amazonaws.services.s3.model.S3ObjectInputStream}-based implementation is gone.
+ * the new position. Backed by an {@link S3Client#getObject} call returning the input stream of
+ * the v2 SDK's {@code GetObjectResponse}.
  */
 @NotThreadSafe
 public class S3AInputStream extends InputStream {
