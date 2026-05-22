@@ -398,6 +398,60 @@ public final class InodeTreeTest {
     }
   }
 
+  @Test
+  public void createFileTwoLevelsDeepInheritsAclOnIntermediateAncestor() throws Exception {
+    // Direct regression guard for the production CTAS path: createFile is invoked
+    // for /parent/missing-mid/file when /parent exists and /parent/missing-mid does
+    // not. The intermediate `missing-mid` directory is created by the missing-
+    // ancestor loop in InodeTree.createPath, NOT by the final-component
+    // CreateDirectoryContext / CreateFileContext branches that the original
+    // CSA-21972 patch covered. Without the loop also routing through
+    // Mode.createFullAccess() when create-inherit-parent-acl is on, the
+    // intermediate dir's mask collapses to --- and the leaf file's subsequent
+    // write/delete is denied (HIVE_WRITER_CLOSE_ERROR / abort -> deleteFile EACCES).
+    try (Closeable ignored = new ConfigurationRule(
+        PropertyKey.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL, true,
+        Configuration.modifiableGlobal()).toResource()) {
+      createPath(mTree, new AlluxioURI("/parent"), sDirectoryContext);
+      setDefaultAcl("/parent",
+          "default:user::rwx",
+          "default:group::---",
+          "default:mask::rwx",
+          "default:other::---",
+          "default:user:tenant:rwx");
+
+      // Caller-supplied mode is umask-restricted (group bits = 0) — exactly the
+      // shape Trino's HiveWriter passes through. Pre-fix, this collapsed
+      // generateChildDirACL's mask to ---.
+      CreateFileContext activeCreateContext = CreateFileContext
+          .mergeFrom(CreateFilePOptions.newBuilder()
+              .setBlockSizeBytes(Constants.KB)
+              .setMode(new Mode((short) 0600).toProto())
+              .setRecursive(true))
+          .setOwner(TEST_OWNER).setGroup(TEST_GROUP);
+
+      createPath(mTree, new AlluxioURI("/parent/missing-mid/file"), activeCreateContext);
+
+      // Intermediate dir was implicitly created by the missing-ancestor loop.
+      // It MUST carry the inherited named-user grant with an effective mask;
+      // otherwise the leaf below it (which writes correctly via the patched
+      // leaf-file branch) cannot be deleted on rollback by the same user.
+      MutableInodeDirectory mid = getInodeByPath("/parent/missing-mid").asDirectory();
+      assertTrue(toCliStrings(mid.getACL().getEntries()).contains("user:tenant:rwx"));
+      assertTrue(toCliStrings(mid.getACL().getEntries()).contains("mask::rwx"));
+      // And its default ACL is carried forward so the leaf file inherits in turn.
+      assertTrue(toCliStrings(mid.getDefaultACL().getEntries())
+          .contains("default:user:tenant:rwx"));
+
+      // The leaf file itself stays correctly inherited (final-component
+      // CreateFileContext branch — unchanged by this patch, regression-guarded
+      // alongside).
+      MutableInodeFile leaf = getInodeByPath("/parent/missing-mid/file").asFile();
+      assertTrue(toCliStrings(leaf.getACL().getEntries()).contains("user:tenant:rwx"));
+      assertTrue(toCliStrings(leaf.getACL().getEntries()).contains("mask::rwx"));
+    }
+  }
+
   /**
    * Tests that an exception is thrown when trying to create an already existing directory with the
    * {@code allowExists} flag set to {@code false}.

@@ -953,10 +953,29 @@ public class InodeTree implements DelegatingJournaled {
       // if the parent has default ACL, copy that default ACL as the new directory's default
       // and access acl, ANDed with the umask
       // if it is part of a metadata load operation, we ignore the umask and simply inherit
-      // the default ACL as the directory's new default and access ACL
-      short mode = context.isMetadataLoad() ? Mode.createFullAccess().toShort()
-          : newDir.getMode();
+      // the default ACL as the directory's new default and access ACL.
+      // Same logic applies to active creates when create-inherit-parent-acl is on — the
+      // umask-restricted mode would collapse the ACL mask and silently strip every named
+      // grant inherited from the parent's default ACL. See the matching leaf-create
+      // branches below (and shouldPreserveInheritedAclOnCreate) for the full rationale.
+      //
+      // Why this loop also needs the override (the original two-leaf-only fix was
+      // incomplete): a Trino CTAS issues createFile(/<bucket>/smoke-ctas-<id>/<file>) and
+      // /<bucket>/smoke-ctas-<id>/ does not yet exist. createPath iterates path
+      // components and creates the intermediate directory here — NOT in the final-
+      // component blocks at the bottom of the method. Without this override, the
+      // intermediate dir inherits the default ACL with mask collapsed to ---, so the
+      // very next write under it fails with "Permission denied" even though the leaf
+      // file (handled by the patched final-component CreateFileContext block) does
+      // get the correct ACL. That's the CSA-21972 HIVE_WRITER_CLOSE_ERROR /
+      // rollback-deleteFile-denied symptom in production.
       DefaultAccessControlList dAcl = currentInodeDirectory.getDefaultACL();
+      boolean preserveInheritedAcl =
+          shouldPreserveInheritedAclOnMetadataLoad(context, dAcl)
+              || shouldPreserveInheritedAclOnCreate(context, dAcl);
+      short mode = (context.isMetadataLoad() || preserveInheritedAcl)
+          ? Mode.createFullAccess().toShort()
+          : newDir.getMode();
       if (!dAcl.isEmpty()) {
         Pair<AccessControlList, DefaultAccessControlList> pair =
             dAcl.generateChildDirACL(mode);
