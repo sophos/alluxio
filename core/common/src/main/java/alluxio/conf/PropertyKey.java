@@ -7473,22 +7473,6 @@ public final class PropertyKey implements Comparable<PropertyKey> {
                   .setScope(Scope.MASTER)
                   .setIsDynamic(false)
                   .build();
-  public static final PropertyKey SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL =
-          booleanBuilder(Name.SECURITY_AUTHORIZATION_CREATE_INHERIT_PARENT_ACL)
-                  .setDefaultValue(false)
-                  .setDescription("Whether active createFile / createDirectory should preserve a "
-                          + "parent directory's default ACL on the new child instead of letting the "
-                          + "caller's umask narrow it. Companion knob to "
-                          + "alluxio.security.authorization.sync.inherit-parent-acl, but for fresh "
-                          + "writes (not UFS metadata loads). Required when downstream POSIX "
-                          + "default-ACL entries (e.g. default:user:<tenant>:rwx) must take effect "
-                          + "on files created by external authenticated callers, since the "
-                          + "caller's CreateFileContext mode group-bits are otherwise ANDed into "
-                          + "the inherited mask and zero out every named-user grant.")
-                  .setConsistencyCheckLevel(ConsistencyCheckLevel.ENFORCE)
-                  .setScope(Scope.MASTER)
-                  .setIsDynamic(false)
-                  .build();
   public static final PropertyKey SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS =
           durationBuilder(Name.SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS)
                   .setAlias("alluxio.security.group.mapping.cache.timeout.ms")
