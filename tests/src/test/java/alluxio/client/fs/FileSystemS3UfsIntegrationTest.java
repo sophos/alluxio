@@ -24,13 +24,6 @@ import alluxio.grpc.WritePType;
 import alluxio.testutils.BaseIntegrationTest;
 import alluxio.testutils.LocalAlluxioClusterResource;
 
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.regions.Regions;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.services.s3.model.S3Object;
 import org.apache.commons.io.IOUtils;
 import org.gaul.s3proxy.junit.S3ProxyRule;
 import org.junit.After;
@@ -38,6 +31,17 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -66,7 +70,7 @@ public class FileSystemS3UfsIntegrationTest extends BaseIntegrationTest {
           .setStartCluster(false)
           .build();
   private FileSystem mFileSystem = null;
-  private AmazonS3 mS3Client = null;
+  private S3Client mS3Client = null;
   @Rule
   public ExpectedException mThrown = ExpectedException.none();
 
@@ -74,17 +78,21 @@ public class FileSystemS3UfsIntegrationTest extends BaseIntegrationTest {
 
   @Before
   public void before() throws Exception {
-    mS3Client = AmazonS3ClientBuilder
-        .standard()
-        .withPathStyleAccessEnabled(true)
-        .withCredentials(
-            new AWSStaticCredentialsProvider(
-                new BasicAWSCredentials(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
-        .withEndpointConfiguration(
-            new AwsClientBuilder.EndpointConfiguration(mS3Proxy.getUri().toString(),
-                Regions.US_WEST_2.getName()))
+    // SDK v2 + S3Proxy compat: force path-style, disable the SDK's default checksum-mode header,
+    // and pin the test client to us-east-1 to dodge the LocationConstraint header on
+    // CreateBucket. The alluxio s3a UFS still talks to S3Proxy as us-west-2 via the cluster
+    // resource properties.
+    mS3Client = S3Client.builder()
+        .endpointOverride(mS3Proxy.getUri())
+        .region(Region.US_EAST_1)
+        .credentialsProvider(StaticCredentialsProvider.create(
+            AwsBasicCredentials.create(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
+        .serviceConfiguration(S3Configuration.builder()
+            .pathStyleAccessEnabled(true)
+            .checksumValidationEnabled(false)
+            .build())
         .build();
-    mS3Client.createBucket(TEST_BUCKET);
+    mS3Client.createBucket(CreateBucketRequest.builder().bucket(TEST_BUCKET).build());
 
     mLocalAlluxioClusterResource.start();
     mFileSystem = mLocalAlluxioClusterResource.get().getClient();
@@ -92,12 +100,17 @@ public class FileSystemS3UfsIntegrationTest extends BaseIntegrationTest {
 
   @After
   public void after() {
-    mS3Client = null;
+    if (mS3Client != null) {
+      mS3Client.close();
+      mS3Client = null;
+    }
   }
 
   @Test
   public void basicMetadataSync() throws IOException, AlluxioException {
-    mS3Client.putObject(TEST_BUCKET, TEST_FILE, TEST_CONTENT);
+    mS3Client.putObject(
+        PutObjectRequest.builder().bucket(TEST_BUCKET).key(TEST_FILE).build(),
+        RequestBody.fromString(TEST_CONTENT));
     FileInStream fis = mFileSystem.openFile(new AlluxioURI("/" + TEST_FILE));
     assertEquals(TEST_CONTENT, IOUtils.toString(fis, StandardCharsets.UTF_8));
   }
@@ -109,9 +122,9 @@ public class FileSystemS3UfsIntegrationTest extends BaseIntegrationTest {
         CreateFilePOptions.newBuilder().setWriteType(WritePType.CACHE_THROUGH).build());
     fos.write(TEST_CONTENT.getBytes());
     fos.close();
-    try (S3Object s3Object = mS3Client.getObject(TEST_BUCKET, TEST_FILE2)) {
-      assertEquals(
-          TEST_CONTENT, IOUtils.toString(s3Object.getObjectContent(), StandardCharsets.UTF_8));
+    try (ResponseInputStream<GetObjectResponse> in = mS3Client.getObject(
+        GetObjectRequest.builder().bucket(TEST_BUCKET).key(TEST_FILE2).build())) {
+      assertEquals(TEST_CONTENT, IOUtils.toString(in, StandardCharsets.UTF_8));
     }
   }
 }

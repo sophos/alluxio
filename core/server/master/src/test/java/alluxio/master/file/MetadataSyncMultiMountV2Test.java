@@ -81,10 +81,10 @@ public class MetadataSyncMultiMountV2Test extends MetadataSyncV2TestBase {
       throws Throwable {
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
     mFileSystemMaster.mount(NESTED_S3_MOUNT_POINT, UFS_ROOT2, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET, "f1", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET, "d/f1", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET2, "f2", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET2, "d/f2", TEST_CONTENT);
+    putObject(TEST_BUCKET, "f1", TEST_CONTENT);
+    putObject(TEST_BUCKET, "d/f1", TEST_CONTENT);
+    putObject(TEST_BUCKET2, "f2", TEST_CONTENT);
+    putObject(TEST_BUCKET2, "d/f2", TEST_CONTENT);
 
     /*
       / (ROOT) -> unchanged (root mount point local fs)
@@ -127,10 +127,10 @@ public class MetadataSyncMultiMountV2Test extends MetadataSyncV2TestBase {
 
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
     mFileSystemMaster.mount(NESTED_S3_MOUNT_POINT, UFS_ROOT2, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET, "nested_s3_mount/shadowed", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET, "nested_s3_mount/bar/baz", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET, "not_shadowed", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET2, "foo", TEST_CONTENT);
+    putObject(TEST_BUCKET, "nested_s3_mount/shadowed", TEST_CONTENT);
+    putObject(TEST_BUCKET, "nested_s3_mount/bar/baz", TEST_CONTENT);
+    putObject(TEST_BUCKET, "not_shadowed", TEST_CONTENT);
+    putObject(TEST_BUCKET2, "foo", TEST_CONTENT);
 
     TaskGroup result = mFileSystemMaster.getMetadataSyncer().syncPath(
         new AlluxioURI("/"), DescendantType.ALL, mDirectoryLoadType, 0);
@@ -152,15 +152,15 @@ public class MetadataSyncMultiMountV2Test extends MetadataSyncV2TestBase {
       throws Throwable {
     // mount /s3_mount -> s3://test-bucket
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET, "foo/bar", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET, "foo/baz", TEST_CONTENT);
+    putObject(TEST_BUCKET, "foo/bar", TEST_CONTENT);
+    putObject(TEST_BUCKET, "foo/baz", TEST_CONTENT);
 
     mFileSystemMaster.createDirectory(new AlluxioURI("/mnt"),
         CreateDirectoryContext.defaults().setWriteType(WriteType.THROUGH));
     // mount /mnt/nested_s3_mount -> s3://test-bucket-2
     mFileSystemMaster.mount(NESTED_MOUNT_POINT, UFS_ROOT2, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET2, "foo/bar", TEST_CONTENT);
-    mS3Client.putObject(TEST_BUCKET2, "foo/baz", TEST_CONTENT);
+    putObject(TEST_BUCKET2, "foo/bar", TEST_CONTENT);
+    putObject(TEST_BUCKET2, "foo/baz", TEST_CONTENT);
 
     TaskGroup result = mFileSystemMaster.getMetadataSyncer().syncPath(
         new AlluxioURI("/"), DescendantType.ONE, mDirectoryLoadType, 0);
