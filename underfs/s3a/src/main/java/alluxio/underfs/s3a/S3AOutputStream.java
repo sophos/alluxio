@@ -31,10 +31,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.security.DigestOutputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -83,9 +79,6 @@ public class S3AOutputStream extends OutputStream implements ContentHashable {
   /** The output stream to a local file where the file will be buffered until closed. */
   private OutputStream mLocalOutputStream;
 
-  /** The MD5 hash of the file. */
-  private MessageDigest mHash;
-
   private String mContentHash;
 
   /**
@@ -108,15 +101,10 @@ public class S3AOutputStream extends OutputStream implements ContentHashable {
     mSseEnabled = sseEnabled;
     mStorageClass = storageClass;
     mFile = new File(PathUtils.concatPath(CommonUtils.getTmpDir(tmpDirs), UUID.randomUUID()));
-    try {
-      mHash = MessageDigest.getInstance("MD5");
-      mLocalOutputStream =
-          new BufferedOutputStream(new DigestOutputStream(new FileOutputStream(mFile), mHash));
-    } catch (NoSuchAlgorithmException e) {
-      LOG.warn("Algorithm not available for MD5 hash.", e);
-      mHash = null;
-      mLocalOutputStream = new BufferedOutputStream(new FileOutputStream(mFile));
-    }
+    // No MD5 digest is computed over the buffered temp file: the upload no longer sends a
+    // Content-MD5 header (see the PUT construction in close()), so digesting every written byte
+    // would be pure overhead.
+    mLocalOutputStream = new BufferedOutputStream(new FileOutputStream(mFile));
   }
 
   @Override
@@ -158,9 +146,10 @@ public class S3AOutputStream extends OutputStream implements ContentHashable {
       if (mStorageClass != null) {
         reqBuilder.storageClass(mStorageClass);
       }
-      if (mHash != null) {
-        reqBuilder.contentMD5(Base64.getEncoder().encodeToString(mHash.digest()));
-      }
+      // Deliberately no Content-MD5. S3 Express One Zone directory buckets reject the header with
+      // HTTP 501 ("This bucket does not support Content Md5 header"), which broke every write to a
+      // directory bucket (CSA-22413). SDK v2 attaches a CRC32 checksum by default, so integrity is
+      // still verified. Do not reintroduce it.
 
       UploadFileRequest uploadReq = UploadFileRequest.builder()
           .putObjectRequest(reqBuilder.build())

@@ -34,7 +34,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.collections4.IteratorUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -98,7 +97,6 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -119,9 +117,6 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     private static final Logger LOG = LoggerFactory.getLogger(S3AUnderFileSystem.class);
-
-    /** Static hash for a directory's empty contents. */
-    private static final String DIR_HASH;
 
     /** Default owner of objects if owner cannot be determined. */
     private static final String DEFAULT_OWNER = "";
@@ -158,11 +153,6 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
     /** The permissions associated with the bucket. Fetched once and assumed to be immutable. */
     private final Supplier<ObjectPermissions> mPermissions
             = CommonUtils.memoize(this::getPermissionsInternal);
-
-    static {
-        byte[] dirByteHash = DigestUtils.md5(new byte[0]);
-        DIR_HASH = new String(Base64.getEncoder().encode(dirByteHash));
-    }
 
     /**
      * Builds the single, canonical credentials provider used by both the (still-v1)
@@ -624,6 +614,18 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
         return false;
     }
 
+    /**
+     * Creates the zero-byte "directory marker" object Alluxio's object-store abstraction uses
+     * to represent a directory.
+     *
+     * <p>No {@code Content-MD5} header is sent. S3 Express One Zone directory buckets reject it
+     * outright — {@code HTTP 501 "This bucket does not support Content Md5 header"} — which made
+     * every directory creation on a directory bucket fail, and with it every CTAS writing under a
+     * new prefix (CSA-22413). SDK v2 already attaches a CRC32 checksum to uploads by default
+     * ({@code requestChecksumCalculation = WHEN_SUPPORTED}), so integrity is still verified
+     * end-to-end; the MD5 header was redundant on regular buckets and fatal on directory ones.
+     * Do not reintroduce it.
+     */
     @Override
     public boolean createEmptyObject(String key) {
         try {
@@ -631,7 +633,6 @@ public class S3AUnderFileSystem extends ObjectUnderFileSystem {
                     .bucket(mBucketName)
                     .key(key)
                     .contentLength(0L)
-                    .contentMD5(DIR_HASH)
                     .contentType("application/octet-stream");
             if (mStorageClass != null) {
                 builder.storageClass(mStorageClass);

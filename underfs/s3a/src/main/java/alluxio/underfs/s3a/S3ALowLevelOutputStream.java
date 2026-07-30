@@ -98,6 +98,16 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
     mStorageClass = storageClass;
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * <p>{@code md5} is intentionally ignored. S3 Express One Zone directory buckets reject
+   * {@code Content-MD5} with {@code HTTP 501 "This bucket does not support Content Md5 header"}
+   * (CSA-22413), and SDK v2 already attaches a CRC32 checksum by default, so the header is
+   * redundant on regular buckets too. The parameter stays in the signature because
+   * {@link alluxio.underfs.ObjectLowLevelOutputStream} declares it for every object-store
+   * implementation (COS, OSS, ...) — dropping it there is out of scope for the S3 module.
+   */
   @Override
   protected void uploadPartInternal(
       File file,
@@ -112,9 +122,6 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
           .uploadId(mUploadId)
           .partNumber(partNumber)
           .contentLength(file.length());
-      if (md5 != null) {
-        reqBuilder.contentMD5(md5);
-      }
       // v1's UploadPartRequest.setLastPart(boolean) was client-side validation only;
       // v2 doesn't model it. The server decides what's "last" at CompleteMultipartUpload time.
       UploadPartResponse resp = getClient().uploadPart(reqBuilder.build(),
@@ -211,6 +218,11 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
     }
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * <p>{@code md5} is intentionally ignored — see {@link #uploadPartInternal} for why.
+   */
   @Override
   protected void putObject(String key, File file, @Nullable String md5) throws IOException {
     try {
@@ -224,9 +236,6 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
       }
       if (mStorageClass != null) {
         reqBuilder.storageClass(mStorageClass);
-      }
-      if (md5 != null) {
-        reqBuilder.contentMD5(md5);
       }
       PutObjectResponse resp = getClient().putObject(reqBuilder.build(),
           RequestBody.fromFile(file));
