@@ -888,13 +888,42 @@ public class TieredBlockStore implements LocalBlockStore {
       }
       String dstFilePath = dstTempBlock.getCommitPath();
 
-      // Heavy IO is guarded by block lock but not metadata lock. This may throw IOException.
-      FileUtils.move(srcFilePath, dstFilePath);
+      boolean blockFileMoved = false;
+      try {
+        // Heavy IO is guarded by block lock but not metadata lock. This may throw IOException.
+        FileUtils.move(srcFilePath, dstFilePath);
+        blockFileMoved = true;
 
-      try (LockResource r = new LockResource(mMetadataWriteLock)) {
-        // If this metadata update fails, we panic for now.
-        // TODO(bin): Implement rollback scheme to recover from IO failures.
-        mMetaManager.moveBlockMeta(srcBlockMeta, dstTempBlock);
+        try (LockResource r = new LockResource(mMetadataWriteLock)) {
+          // If this metadata update fails, we panic for now.
+          // TODO(bin): Implement rollback scheme to recover from IO failures.
+          mMetaManager.moveBlockMeta(srcBlockMeta, dstTempBlock);
+        }
+      } catch (Exception e) {
+        // CSA-22595: roll back the temp block meta allocated above before propagating.
+        //
+        // The temp block meta is keyed by `blockId`, so leaving it registered makes
+        // checkTempBlockDoesNotExist() throw for every subsequent move of this same block --
+        // permanently. Move uses an ad-hoc id from Sessions.createInternalSessionId(), which is
+        // never registered with `Sessions`, so it never times out and SessionCleaner never reaps
+        // the orphan. The observed symptom is a block-management task retrying the same MEM->SSD
+        // eviction every ~10s for the life of the worker, and that block is never demoted.
+        try (LockResource r = new LockResource(mMetadataWriteLock)) {
+          mMetaManager.abortTempBlockMeta(dstTempBlock);
+        }
+        if (!blockFileMoved) {
+          // The block data is still at srcFilePath, so anything at the destination is a partial
+          // copy owned by this failed operation.
+          FileUtils.deleteIfExists(dstFilePath);
+        } else {
+          // The file moved but the metadata update failed: the destination now holds the only
+          // copy while block meta still points at the source. That is the pre-existing "we panic"
+          // case noted above -- deliberately do NOT delete the file, or the block is lost.
+          LOG.error("Block {} moved to {} but its metadata update failed. Block meta still refers "
+              + "to {}; the on-disk copy at the destination is now the only one.",
+              blockId, dstFilePath, srcFilePath);
+        }
+        throw e;
       }
       return new MoveBlockResult(true, blockSize, srcLocation, dstLocation);
     }
