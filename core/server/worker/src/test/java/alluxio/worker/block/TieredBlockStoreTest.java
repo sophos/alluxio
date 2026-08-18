@@ -14,6 +14,7 @@ package alluxio.worker.block;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.any;
@@ -49,6 +50,7 @@ import org.junit.rules.TemporaryFolder;
 import org.mockito.invocation.InvocationOnMock;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -236,6 +238,45 @@ public final class TieredBlockStoreTest {
     assertFalse(mMetaManager.hasTempBlockMeta(BLOCK_ID1));
     assertTrue(mBlockStore.hasBlockMeta(BLOCK_ID1));
     assertTrue(FileUtils.exists(DefaultBlockMeta.commitPath(mTestDir1, BLOCK_ID1)));
+  }
+
+  /**
+   * Tests that a failed {@link TieredBlockStore#moveBlock} does not leave an orphan temp block
+   * meta behind. The temp block meta is keyed by block id, so an orphan makes every later move of
+   * the same block fail its precondition permanently -- a block-management task then retries the
+   * same eviction forever, since the internal session id used by move is never reaped by
+   * SessionCleaner (CSA-22595).
+   */
+  @Test
+  public void moveBlockFailureDoesNotLeakTempBlockMeta() throws Exception {
+    TieredBlockStoreTestUtils.cache2(SESSION_ID1, BLOCK_ID1, BLOCK_SIZE, mTestDir1, mMetaManager,
+        mBlockIterator);
+    long availableBytesBefore = mMetaManager.getAvailableBytes(mTestDir2.toBlockStoreLocation());
+
+    // Remove the backing file while leaving block meta intact, so the temp block is allocated and
+    // the subsequent file move then fails.
+    FileUtils.delete(DefaultBlockMeta.commitPath(mTestDir1, BLOCK_ID1));
+
+    assertThrows(IOException.class, () -> mBlockStore.moveBlock(SESSION_ID1, BLOCK_ID1,
+        AllocateOptions.forMove(mTestDir2.toBlockStoreLocation())));
+
+    // The orphan temp block meta must not survive the failure, and its reserved space must be
+    // released back to the destination dir.
+    assertFalse(mMetaManager.hasTempBlockMeta(BLOCK_ID1));
+    assertFalse(mTestDir2.hasTempBlockMeta(BLOCK_ID1));
+    assertEquals(availableBytesBefore,
+        mMetaManager.getAvailableBytes(mTestDir2.toBlockStoreLocation()));
+
+    // Retrying must fail the same way it did the first time. Before the fix it failed with
+    // "Temp blockId ... is not available, because it already exists" instead, forever.
+    try {
+      mBlockStore.moveBlock(SESSION_ID1, BLOCK_ID1,
+          AllocateOptions.forMove(mTestDir2.toBlockStoreLocation()));
+      fail("Expected the retry to fail because the block file is still missing");
+    } catch (Exception e) {
+      assertFalse("retry hit the leaked-temp-block precondition: " + e.getMessage(),
+          e.getMessage() != null && e.getMessage().contains("because it already exists"));
+    }
   }
 
   /**
