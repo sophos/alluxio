@@ -52,6 +52,9 @@ import javax.annotation.concurrent.NotThreadSafe;
 public final class DefaultStorageDir implements StorageDir {
   private static final Logger LOG = LoggerFactory.getLogger(DefaultStorageDir.class);
 
+  /** Fraction of raw volume size held back for filesystem metadata that cannot hold blocks. */
+  private static final double FS_METADATA_OVERHEAD_RATIO = 0.01;
+
   private final long mCapacityBytes;
   private final String mDirMedium;
   /** A map from block id to block metadata. */
@@ -104,13 +107,19 @@ public final class DefaultStorageDir implements StorageDir {
     }
 
     long totalSpace = parentDir.getTotalSpace();
-    if (totalSpace > 0 && capacityBytes > totalSpace) {
-      LOG.warn("Configured capacity {} for storage dir {} exceeds filesystem total {}. Adjusting down.",
-              capacityBytes, dirPath, totalSpace);
-      capacityBytes = totalSpace;
+    // CSA-22596: getTotalSpace() counts filesystem metadata (measured 0.71% on our 884GB XFS
+    // volumes) that can never hold blocks. Clamping to it puts the allocator's ceiling above the
+    // filesystem's, so eviction -- which only runs when an allocation finds no space -- never
+    // fires, and the mmap'd .tmp_blocks write dies on an uncatchable SIGBUS instead.
+    long usableSpace = (long) (totalSpace * (1.0 - FS_METADATA_OVERHEAD_RATIO));
+    if (totalSpace > 0 && capacityBytes > usableSpace) {
+      LOG.warn("Configured capacity {} for storage dir {} exceeds usable space {} (filesystem "
+              + "total {} less {}% held back for filesystem metadata). Adjusting down.",
+              capacityBytes, dirPath, usableSpace, totalSpace, FS_METADATA_OVERHEAD_RATIO * 100);
+      capacityBytes = usableSpace;
     } else {
-      LOG.info("Configured capacity {} for storage dir {} meets filesystem total {}.",
-                capacityBytes, dirPath, totalSpace);
+      LOG.info("Configured capacity {} for storage dir {} fits usable space {} (filesystem "
+                + "total {}).", capacityBytes, dirPath, usableSpace, totalSpace);
     }
 
     DefaultStorageDir dir =
