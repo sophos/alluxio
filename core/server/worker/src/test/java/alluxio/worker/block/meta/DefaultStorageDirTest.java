@@ -50,6 +50,8 @@ public final class DefaultStorageDirTest {
   private static final int TEST_TIER_ORDINAL = 0;
   private static final int TEST_DIR_INDEX = 1;
   private static final long TEST_DIR_CAPACITY = 1000;
+  /** Mirrors {@code DefaultStorageDir.FS_METADATA_OVERHEAD_RATIO}. */
+  private static final double FS_METADATA_OVERHEAD_RATIO = 0.01;
   private static final long TEST_REVERSED_BYTES = TEST_DIR_CAPACITY / 4;
   private String mTestDirPath;
   private StorageTier mTier;
@@ -187,24 +189,103 @@ public final class DefaultStorageDirTest {
   }
 
   /**
-   * Tests that an exception is thrown when trying to initialize a block that is larger than the
-   * capacity.
+   * Tests that a block larger than the capacity is trimmed during initialization rather than
+   * aborting it. Before CSA-22596 this threw, and the thrown exception cost the worker the whole
+   * tier because {@link DefaultStorageTier} drops any dir that fails to initialize.
    */
   @Test
   public void initializeMetaBlockLargerThanCapacity() throws Exception {
     File testDir = mFolder.newFolder();
 
     newBlockFile(testDir, String.valueOf(TEST_BLOCK_ID), Ints.checkedCast(TEST_DIR_CAPACITY + 1));
-    String alias = Constants.MEDIUM_MEM;
-    mThrown.expect(ResourceExhaustedRuntimeException.class);
-    mThrown.expectMessage(ExceptionMessage.NO_SPACE_FOR_BLOCK_META.getMessage(TEST_BLOCK_ID,
-        TEST_DIR_CAPACITY + 1, TEST_DIR_CAPACITY, alias));
+
     mDir = newStorageDir(testDir);
-    assertMetadataEmpty(mDir, TEST_DIR_CAPACITY);
-    // assert file not deleted
-    File[] files = testDir.listFiles();
-    Assert.assertNotNull(files);
-    assertEquals(1, files.length);
+
+    // The block can never fit, so it is discarded and the dir comes up empty but usable.
+    assertStorageDirEmpty(testDir, mDir, TEST_DIR_CAPACITY);
+  }
+
+  /**
+   * Tests that blocks which overrun the capacity are trimmed during initialization while the ones
+   * that fit are retained, so the dir comes up usable instead of being lost. See CSA-22596.
+   */
+  @Test
+  public void initializeMetaTrimsBlocksExceedingCapacity() throws Exception {
+    File testDir = mFolder.newFolder();
+
+    // 3 x 400 bytes against a 1000 byte capacity: two fit, the third cannot.
+    int blockSizeBytes = 400;
+    int nBlock = 3;
+    for (int blockId = 0; blockId < nBlock; blockId++) {
+      newBlockFile(testDir, String.valueOf(blockId), blockSizeBytes);
+    }
+
+    mDir = newStorageDir(testDir);
+
+    assertEquals(TEST_DIR_CAPACITY, mDir.getCapacityBytes());
+    assertEquals(nBlock - 1, mDir.getBlockIds().size());
+    assertEquals(TEST_DIR_CAPACITY - (nBlock - 1) * blockSizeBytes, mDir.getAvailableBytes());
+
+    // The trimmed block is gone from disk, and every file left behind has metadata.
+    File[] remaining = testDir.listFiles();
+    Assert.assertNotNull(remaining);
+    assertEquals(nBlock - 1, remaining.length);
+    for (File file : remaining) {
+      assertTrue(mDir.hasBlockMeta(Long.parseLong(file.getName())));
+    }
+  }
+
+  /**
+   * Tests the CSA-22596 upgrade path: blocks committed under a larger capacity are trimmed to fit
+   * when the dir is re-initialized with a smaller one. This is what the filesystem-metadata
+   * holdback does to a volume that was already filled to the previous ceiling.
+   */
+  @Test
+  public void initializeMetaTrimsBlocksCommittedUnderLargerCapacity() throws Exception {
+    File testDir = mFolder.newFolder();
+
+    // 4 x 250 bytes exactly fills the original 1000 byte capacity.
+    int blockSizeBytes = 250;
+    int nBlock = 4;
+    for (int blockId = 0; blockId < nBlock; blockId++) {
+      newBlockFile(testDir, String.valueOf(blockId), blockSizeBytes);
+    }
+    assertEquals(nBlock, newStorageDir(testDir).getBlockIds().size());
+
+    // Re-initialize with the capacity reduced by one block's worth.
+    long shrunkCapacity = TEST_DIR_CAPACITY - blockSizeBytes;
+    mDir = DefaultStorageDir.newStorageDir(mTier, TEST_DIR_INDEX, shrunkCapacity, 0,
+        testDir.getAbsolutePath(), Constants.MEDIUM_MEM);
+
+    assertEquals(shrunkCapacity, mDir.getCapacityBytes());
+    assertEquals(nBlock - 1, mDir.getBlockIds().size());
+    assertEquals(0, mDir.getAvailableBytes());
+    File[] remaining = testDir.listFiles();
+    Assert.assertNotNull(remaining);
+    assertEquals(nBlock - 1, remaining.length);
+  }
+
+  /**
+   * Tests that a configured capacity exceeding the volume is clamped to the usable share, holding
+   * back the fraction the filesystem itself occupies, and that a capacity which already fits is
+   * left alone. See CSA-22596.
+   */
+  @Test
+  public void newStorageDirHoldsBackFilesystemMetadataOverhead() throws Exception {
+    File testDir = mFolder.newFolder();
+    long volumeTotalBytes = testDir.getParentFile().getTotalSpace();
+    assertTrue("volume size must be known to exercise the clamp", volumeTotalBytes > 0);
+
+    // Asking for the whole raw volume must be clamped down to the usable share of it.
+    StorageDir clampedDir = DefaultStorageDir.newStorageDir(mTier, TEST_DIR_INDEX,
+        volumeTotalBytes, 0, testDir.getAbsolutePath(), Constants.MEDIUM_MEM);
+    assertEquals((long) (volumeTotalBytes * (1.0 - FS_METADATA_OVERHEAD_RATIO)),
+        clampedDir.getCapacityBytes());
+
+    // A capacity that already fits within the usable share is untouched.
+    StorageDir fittingDir = DefaultStorageDir.newStorageDir(mTier, TEST_DIR_INDEX,
+        TEST_DIR_CAPACITY, 0, mFolder.newFolder().getAbsolutePath(), Constants.MEDIUM_MEM);
+    assertEquals(TEST_DIR_CAPACITY, fittingDir.getCapacityBytes());
   }
 
   /**

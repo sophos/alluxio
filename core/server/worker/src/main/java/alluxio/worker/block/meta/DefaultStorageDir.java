@@ -30,7 +30,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -137,6 +139,11 @@ public final class DefaultStorageDir implements StorageDir {
    * Only paths satisfying the contract defined in
    * {@link DefaultBlockMeta#commitPath(StorageDir, long)} are legal, should be in format like
    * {dir}/{blockId}. other paths will be deleted.
+   *
+   * Blocks that no longer fit this dir's capacity are deleted too, rather than aborting
+   * initialization (CSA-22596). Aborting costs the worker the entire tier, because
+   * {@link DefaultStorageTier#initStorageTier} drops any dir that fails to initialize; discarding
+   * the overrun instead keeps the tier usable and only costs a UFS re-read of those blocks.
    */
   private void initializeMeta() {
     // Create the storage directory path
@@ -153,6 +160,11 @@ public final class DefaultStorageDir implements StorageDir {
     if (paths == null) {
       return;
     }
+    // CSA-22596: most recently modified first, so that if the capacity is overrun the blocks kept
+    // are the freshest ones, and the same set is kept on every restart -- listFiles() order is
+    // filesystem-dependent. Block id breaks ties, since mtime granularity is coarser than writes.
+    Arrays.sort(paths, Comparator.comparingLong(File::lastModified).reversed()
+        .thenComparing(File::getName));
     for (File path : paths) {
       if (!path.isFile()) {
         if (!path.getName().equals(tmpDir)) {
@@ -164,20 +176,41 @@ public final class DefaultStorageDir implements StorageDir {
         } catch (IOException e) {
           LOG.error("can not delete directory {}", path.getAbsolutePath(), e);
         }
-      } else {
-        try {
-          long blockId = Long.parseLong(path.getName());
-          addBlockMeta(new DefaultBlockMeta(blockId, path.length(), this));
-        } catch (NumberFormatException e) {
-          LOG.error("filename of {} in StorageDir can not be parsed into long",
-              path.getAbsolutePath(), e);
-          if (path.delete()) {
-            LOG.warn("file {} has been deleted", path.getAbsolutePath());
-          } else {
-            LOG.error("can not delete file {}", path.getAbsolutePath());
-          }
-        }
+        continue;
       }
+      long blockId;
+      try {
+        blockId = Long.parseLong(path.getName());
+      } catch (NumberFormatException e) {
+        LOG.error("filename of {} in StorageDir can not be parsed into long",
+            path.getAbsolutePath(), e);
+        deleteInitializationLeftover(path);
+        continue;
+      }
+      try {
+        addBlockMeta(new DefaultBlockMeta(blockId, path.length(), this));
+      } catch (ResourceExhaustedRuntimeException e) {
+        // CSA-22596: the data on disk outgrew this dir's capacity, which happens when the capacity
+        // shrinks below what a previous run committed. Keep the dir usable and let the cache
+        // refill from the UFS instead of losing the tier for the lifetime of the worker.
+        LOG.warn("Block {} ({} bytes) does not fit the {} bytes available in storage dir {} "
+            + "(capacity {} bytes); discarding it so the dir stays usable.",
+            blockId, path.length(), getAvailableBytes(), mDirPath, mCapacityBytes);
+        deleteInitializationLeftover(path);
+      }
+    }
+  }
+
+  /**
+   * Deletes a file that cannot be tracked as a block of this dir, logging the outcome.
+   *
+   * @param path the file to delete
+   */
+  private static void deleteInitializationLeftover(File path) {
+    if (path.delete()) {
+      LOG.warn("file {} has been deleted", path.getAbsolutePath());
+    } else {
+      LOG.error("can not delete file {}", path.getAbsolutePath());
     }
   }
 
