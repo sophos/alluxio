@@ -37,6 +37,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Unit tests for {@link DefaultStorageDir}.
@@ -263,6 +264,28 @@ public final class DefaultStorageDirTest {
     File[] remaining = testDir.listFiles();
     Assert.assertNotNull(remaining);
     assertEquals(nBlock - 1, remaining.length);
+  }
+
+  /**
+   * Tests that a dir configured with a bare relative path initializes. Such a path has no parent
+   * directory to resolve the volume from as written, which used to fail with a
+   * {@link NullPointerException} before the path was resolved to an absolute one.
+   */
+  @Test
+  public void newStorageDirWithBareRelativePath() throws Exception {
+    // A bare relative path resolves against the working directory, so keep the name unique and
+    // remove it again rather than leaving it behind.
+    File relativeDir = new File("alluxio-storage-dir-test-" + UUID.randomUUID());
+    try {
+      StorageDir dir = DefaultStorageDir.newStorageDir(mTier, TEST_DIR_INDEX, TEST_DIR_CAPACITY, 0,
+          relativeDir.getPath(), Constants.MEDIUM_MEM);
+
+      assertEquals(TEST_DIR_CAPACITY, dir.getCapacityBytes());
+      assertEquals(TEST_DIR_CAPACITY, dir.getAvailableBytes());
+      assertTrue(relativeDir.isDirectory());
+    } finally {
+      org.apache.commons.io.FileUtils.deleteQuietly(relativeDir);
+    }
   }
 
   /**

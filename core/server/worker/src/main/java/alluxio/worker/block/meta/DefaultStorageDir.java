@@ -102,8 +102,14 @@ public final class DefaultStorageDir implements StorageDir {
    */
   public static StorageDir newStorageDir(StorageTier tier, int dirIndex, long capacityBytes,
         long reservedBytes, String dirPath, String dirMedium) {
-    // Adjust capacity if overprovisioned
-    File parentDir = new File(dirPath).getParentFile();
+    // Adjust capacity if overprovisioned. Resolve to an absolute path first: getParentFile() is
+    // null for a single-segment relative path, and dereferencing it threw NullPointerException.
+    File storageDir = new File(dirPath).getAbsoluteFile();
+    File parentDir = storageDir.getParentFile();
+    if (parentDir == null) {
+      // The dir sits at the filesystem root, so measure the volume at the dir itself.
+      parentDir = storageDir;
+    }
     if (!parentDir.exists()) {
       parentDir.mkdirs();
     }

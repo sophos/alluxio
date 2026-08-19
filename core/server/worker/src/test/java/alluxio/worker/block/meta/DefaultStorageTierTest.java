@@ -171,7 +171,7 @@ public class DefaultStorageTierTest {
   }
 
   @Test
-  public void removeDir() {
+  public void removeDir() throws Exception {
     List<StorageDir> dirs = mTier.getStorageDirs();
     Assert.assertEquals(2, dirs.size());
     StorageDir dir0 = dirs.get(0);
@@ -182,8 +182,8 @@ public class DefaultStorageTierTest {
     Assert.assertEquals(ImmutableList.of(), mTier.getStorageDirs());
 
     StorageTier anotherTier = DefaultStorageTier.newStorageTier("anotherTier", 0, false);
-    StorageDir dirInAnotherTier =
-        DefaultStorageDir.newStorageDir(anotherTier, 0, 0, 0, "dir", "medium");
+    StorageDir dirInAnotherTier = DefaultStorageDir.newStorageDir(anotherTier, 0, 0, 0,
+        mFolder.newFolder().getAbsolutePath(), "medium");
     Assert.assertThrows("should not remove a dir that does not belong to this tier",
         IllegalArgumentException.class, () -> mTier.removeStorageDir(dirInAnotherTier));
   }
