@@ -182,6 +182,7 @@ import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.executor.ExecutorServiceFactory;
 import alluxio.util.io.PathUtils;
+import alluxio.util.logging.SamplingLogger;
 import alluxio.util.proto.ProtoUtils;
 import alluxio.wire.BlockInfo;
 import alluxio.wire.BlockLocation;
@@ -257,6 +258,12 @@ import javax.annotation.concurrent.NotThreadSafe;
 public class DefaultFileSystemMaster extends CoreMaster
     implements FileSystemMaster, DelegatingJournaled {
   private static final Logger LOG = LoggerFactory.getLogger(DefaultFileSystemMaster.class);
+  /**
+   * For warnings that would otherwise fire once per inode of a recursive walk. See the use in
+   * {@link #setUfsAcl(LockedInodePath)}.
+   */
+  private static final Logger SAMPLING_LOG =
+      new SamplingLogger(LOG, 30L * Constants.SECOND_MS);
   private static final Set<Class<? extends Server>> DEPS = ImmutableSet.of(BlockMaster.class);
 
   /** The number of threads to use in the {@link #mPersistCheckerPool}. */
@@ -3846,14 +3853,24 @@ public class DefaultFileSystemMaster extends CoreMaster
       throws InvalidPathException, AccessControlException {
     Inode inode = inodePath.getInodeOrNull();
 
-    checkUfsMode(inodePath.getUri(), OperationType.WRITE);
+    // CSA-22628: resolve once. This used to call checkUfsMode(uri, ...), which resolves the mount
+    // itself, and then resolve a second time. MountTable#resolve is not free: it takes the mount
+    // table read lock, builds the list of every possible mount point for the path, and acquires a
+    // UFS resource of its own to resolve the URI. Two of those per inode, on a walk of millions.
     MountTable.Resolution resolution = mMountTable.resolve(inodePath.getUri());
+    checkUfsMode(resolution, OperationType.WRITE);
     String ufsUri = resolution.getUri().toString();
     try (CloseableResource<UnderFileSystem> ufsResource = resolution.acquireUfsResource()) {
       UnderFileSystem ufs = ufsResource.get();
       if (ufs.isObjectStorage()) {
-        LOG.warn("SetACL is not supported to object storage UFS via Alluxio. "
-            + "UFS: " + ufsUri + ". This has no effect on the underlying object.");
+        // Sampled, not once per inode. setAclRecursive hoists this decision out of its walk
+        // entirely (see subtreeSupportsUfsAcl), but a subtree spanning both object-storage and
+        // non-object-storage mounts still reaches here per inode. At 324 bytes a line an
+        // unsampled warning writes ~1.5GB and rolls the 10MB master log ~139 times on charlie's
+        // largest mount, overwriting the whole MaxBackupIndex=100 history exactly when it is
+        // wanted to diagnose the operation that produced it.
+        SAMPLING_LOG.warn("SetACL is not supported to object storage UFS via Alluxio. UFS: {}. "
+            + "This has no effect on the underlying object.", ufsUri);
       } else {
         try {
           List<AclEntry> entries = new ArrayList<>(inode.getACL().getEntries());
@@ -3868,8 +3885,48 @@ public class DefaultFileSystemMaster extends CoreMaster
     }
   }
 
+  /**
+   * Whether any inode at or under the given path could need its ACL pushed to the under file
+   * system.
+   *
+   * {@link #setUfsAcl(LockedInodePath)} is a no-op for an object-storage UFS: it resolves the
+   * mount, acquires a UFS resource, logs a warning, and leaves the object untouched. Being object
+   * storage is a property of the mount rather than of the inode, so the question can be settled
+   * once per operation in O(number of mounts) instead of once per inode.
+   *
+   * Returns true if the mount holding {@code uri}, or any mount nested under it, is not object
+   * storage. A subtree can span several mounts with different UFS types, so a single non-object
+   * mount anywhere beneath it means the per-inode call is still required.
+   *
+   * @param uri the root of the subtree about to be walked
+   * @return whether any mount in the subtree supports setting ACLs on the UFS
+   */
+  private boolean subtreeSupportsUfsAcl(AlluxioURI uri) throws InvalidPathException {
+    if (mountSupportsUfsAcl(uri)) {
+      return true;
+    }
+    for (MountInfo nested : mMountTable.findChildrenMountPoints(uri, false)) {
+      if (mountSupportsUfsAcl(nested.getAlluxioUri())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @param uri a path whose mount should be inspected
+   * @return whether that mount's UFS supports setting ACLs
+   */
+  private boolean mountSupportsUfsAcl(AlluxioURI uri) throws InvalidPathException {
+    try (CloseableResource<UnderFileSystem> ufsResource =
+             mMountTable.resolve(uri).acquireUfsResource()) {
+      return !ufsResource.get().isObjectStorage();
+    }
+  }
+
   private void setAclSingleInode(RpcContext rpcContext, SetAclAction action,
-      LockedInodePath inodePath, List<AclEntry> entries, boolean replay, long opTimeMs)
+      LockedInodePath inodePath, List<AclEntry> entries, boolean replay, long opTimeMs,
+      boolean ufsAclSupported)
       throws IOException, FileDoesNotExistException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
 
@@ -3905,7 +3962,7 @@ public class DefaultFileSystemMaster extends CoreMaster
         .build());
 
     try {
-      if (!replay && inode.isPersisted()) {
+      if (!replay && ufsAclSupported && inode.isPersisted()) {
         setUfsAcl(inodePath);
       }
     } catch (InvalidPathException | AccessControlException e) {
@@ -3919,8 +3976,26 @@ public class DefaultFileSystemMaster extends CoreMaster
       SetAclContext context)
       throws IOException, FileDoesNotExistException, AccessControlException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
-    setAclSingleInode(rpcContext, action, inodePath, entries, replay, opTimeMs);
-    if (context.getOptions().getRecursive()) {
+    boolean recursive = context.getOptions().getRecursive();
+    // CSA-22628: settle the UFS question once for the whole walk rather than once per inode.
+    // Only worth doing for the recursive case -- a single-inode call pays the per-inode path,
+    // whose cost is irrelevant at one inode.
+    boolean ufsAclSupported = true;
+    if (recursive) {
+      try {
+        ufsAclSupported = subtreeSupportsUfsAcl(inodePath.getUri());
+      } catch (InvalidPathException e) {
+        throw new IOException(e);
+      }
+      if (!ufsAclSupported) {
+        LOG.warn("SetACL is not supported for the object storage UFS under {}. This recursive "
+            + "operation updates Alluxio metadata only and leaves the underlying objects "
+            + "unchanged; the per-inode warning is suppressed for the rest of the walk.",
+            inodePath.getUri());
+      }
+    }
+    setAclSingleInode(rpcContext, action, inodePath, entries, replay, opTimeMs, ufsAclSupported);
+    if (recursive) {
       // POSIX default ACLs are a directory-only concept. Upstream
       // setAclSingleInode throws UnsupportedOperationException on any default
       // entry applied to a file, which makes `setfacl -R -m "...,default:..."`
@@ -3958,7 +4033,8 @@ public class DefaultFileSystemMaster extends CoreMaster
           if (hasDefaultEntries && descendant.getInode().isFile()) {
             effectiveEntries = accessOnlyEntries;
           }
-          setAclSingleInode(rpcContext, action, childPath, effectiveEntries, replay, opTimeMs);
+          setAclSingleInode(rpcContext, action, childPath, effectiveEntries, replay, opTimeMs,
+              ufsAclSupported);
           journalFlushCounter++;
           if (mMergeInodeJournals
               && journalFlushCounter > mRecursiveOperationForceFlushEntries) {
@@ -5303,7 +5379,18 @@ public class DefaultFileSystemMaster extends CoreMaster
    */
   private void checkUfsMode(AlluxioURI alluxioPath, OperationType opType)
       throws AccessControlException, InvalidPathException {
-    MountTable.Resolution resolution = mMountTable.resolve(alluxioPath);
+    checkUfsMode(mMountTable.resolve(alluxioPath), opType);
+  }
+
+  /**
+   * Overload for callers that have already resolved the mount, so that the resolution -- which
+   * takes the mount table read lock and acquires a UFS resource -- is not repeated.
+   *
+   * @param resolution an already-computed mount table resolution
+   * @param opType the operation type
+   */
+  private void checkUfsMode(MountTable.Resolution resolution, OperationType opType)
+      throws AccessControlException {
     try (CloseableResource<UnderFileSystem> ufsResource = resolution.acquireUfsResource()) {
       UnderFileSystem ufs = ufsResource.get();
       UfsMode ufsMode =
