@@ -107,6 +107,7 @@ import alluxio.master.file.meta.InodeDirectory;
 import alluxio.master.file.meta.InodeDirectoryIdGenerator;
 import alluxio.master.file.meta.InodeDirectoryView;
 import alluxio.master.file.meta.InodeFile;
+import alluxio.master.file.meta.InodeIterationResult;
 import alluxio.master.file.meta.InodeLockManager;
 import alluxio.master.file.meta.InodePathPair;
 import alluxio.master.file.meta.InodeTree;
@@ -131,6 +132,8 @@ import alluxio.master.journal.ufs.UfsJournalSystem;
 import alluxio.master.metastore.DelegatingReadOnlyInodeStore;
 import alluxio.master.metastore.InodeStore;
 import alluxio.master.metastore.ReadOnlyInodeStore;
+import alluxio.master.metastore.ReadOption;
+import alluxio.master.metastore.SkippableInodeIterator;
 import alluxio.master.metrics.TimeSeriesStore;
 import alluxio.master.scheduler.DefaultWorkerProvider;
 import alluxio.master.scheduler.JournaledJobMetaStore;
@@ -3769,22 +3772,31 @@ public class DefaultFileSystemMaster extends CoreMaster
                mInodeTree.lockInodePath(lockingScheme, rpcContext.getJournalContext());
       ) {
         mPermissionChecker.checkSetAttributePermission(inodePath, false, true, false);
-        if (context.getOptions().getRecursive()) {
-          try (LockedInodePathList descendants = mInodeTree.getDescendants(inodePath)) {
-            for (LockedInodePath child : descendants) {
-              mPermissionChecker.checkSetAttributePermission(child, false, true, false);
-            }
-          } catch (AccessControlException e) {
-            auditContext.setAllowed(false);
-            throw e;
-          }
-        }
-
+        // CSA-22628: the recursive permission check used to happen here, in its own
+        // mInodeTree.getDescendants() pass, and setAclRecursive then walked the subtree a SECOND
+        // time to apply. Each pass materialised an ArrayList holding a WRITE_EDGE lock on every
+        // descendant -- measured at ~764 bytes each, so ~3.2GB on charlie's 4.5M-path mount
+        // against a 5GB master heap. The check is now fused into the single streaming walk in
+        // setAclRecursive, which is also what deleteInternal does with its own recursive
+        // permission check.
+        //
+        // Behaviour change worth reviewing: the check is no longer completed for the whole
+        // subtree before any inode is modified, so an AccessControlException raised deep in the
+        // walk now leaves the inodes visited before it already updated. The operation was never
+        // atomic -- journals are force-flushed every
+        // alluxio.master.recursive.operation.journal.force.flush.max.entries entries, so partial
+        // state was already observable -- and re-applying ACLs is idempotent, so a retry after
+        // fixing permissions converges.
         if (!inodePath.fullPathExists()) {
           throw new FileDoesNotExistException(ExceptionMessage
               .PATH_DOES_NOT_EXIST.getMessage(path));
         }
-        setAclInternal(rpcContext, action, inodePath, entries, context);
+        try {
+          setAclInternal(rpcContext, action, inodePath, entries, context);
+        } catch (AccessControlException e) {
+          auditContext.setAllowed(false);
+          throw e;
+        }
         auditContext.setSucceeded(true);
       }
     }
@@ -3792,7 +3804,7 @@ public class DefaultFileSystemMaster extends CoreMaster
 
   private void setAclInternal(RpcContext rpcContext, SetAclAction action, LockedInodePath inodePath,
       List<AclEntry> entries, SetAclContext context)
-      throws IOException, FileDoesNotExistException {
+      throws IOException, FileDoesNotExistException, AccessControlException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
 
     long opTimeMs = mClock.millis();
@@ -3904,7 +3916,8 @@ public class DefaultFileSystemMaster extends CoreMaster
 
   private void setAclRecursive(RpcContext rpcContext, SetAclAction action,
       LockedInodePath inodePath, List<AclEntry> entries, boolean replay, long opTimeMs,
-      SetAclContext context) throws IOException, FileDoesNotExistException {
+      SetAclContext context)
+      throws IOException, FileDoesNotExistException, AccessControlException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
     setAclSingleInode(rpcContext, action, inodePath, entries, replay, opTimeMs);
     if (context.getOptions().getRecursive()) {
@@ -3926,12 +3939,23 @@ public class DefaultFileSystemMaster extends CoreMaster
             .filter(e -> !e.isDefault())
             .collect(Collectors.toList());
       }
-      try (LockedInodePathList descendants = mInodeTree.getDescendants(inodePath)) {
+      // CSA-22628: process each descendant as it is reached and release it, instead of
+      // materialising the whole subtree first. See the comment on the permission pass in setAcl
+      // for the measured cost of the old behaviour.
+      try (SkippableInodeIterator descendants = mInodeStore.getSkippableChildrenIterator(
+          ReadOption.defaults(), DescendantType.ALL, false, inodePath)) {
         int journalFlushCounter = 0;
-        for (LockedInodePath childPath : descendants) {
+        while (descendants.hasNext()) {
           rpcContext.throwIfCancelled();
+          InodeIterationResult descendant = descendants.next();
+          LockedInodePath childPath = descendant.getLockedPath();
+          // The iterator locks each child without traversing to it; traverse() completes the
+          // lock list. Same idiom as DefaultSyncProcess, the other consumer of this iterator.
+          childPath.traverse();
+          // Fused permission check -- see the note in setAcl.
+          mPermissionChecker.checkSetAttributePermission(childPath, false, true, false);
           List<AclEntry> effectiveEntries = entries;
-          if (hasDefaultEntries && childPath.getInode().isFile()) {
+          if (hasDefaultEntries && descendant.getInode().isFile()) {
             effectiveEntries = accessOnlyEntries;
           }
           setAclSingleInode(rpcContext, action, childPath, effectiveEntries, replay, opTimeMs);
@@ -3942,6 +3966,10 @@ public class DefaultFileSystemMaster extends CoreMaster
             journalFlushCounter = 0;
           }
         }
+      } catch (InvalidPathException e) {
+        // traverse() only fails if the tree changed under the iterator, which the write locks
+        // above are meant to prevent. Surface it rather than silently applying a partial ACL.
+        throw new IOException(e);
       }
     }
   }
