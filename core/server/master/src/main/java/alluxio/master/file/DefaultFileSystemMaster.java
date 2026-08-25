@@ -126,6 +126,7 @@ import alluxio.master.journal.FileSystemMergeJournalContext;
 import alluxio.master.journal.JournalContext;
 import alluxio.master.journal.Journaled;
 import alluxio.master.journal.JournaledGroup;
+import alluxio.master.journal.MetadataSyncMergeJournalContext;
 import alluxio.master.journal.NoopJournalContext;
 import alluxio.master.journal.checkpoint.CheckpointName;
 import alluxio.master.journal.ufs.UfsJournalSystem;
@@ -3775,8 +3776,26 @@ public class DefaultFileSystemMaster extends CoreMaster
       LockingScheme lockingScheme =
           createLockingScheme(path, context.getOptions().getCommonOptions(),
               LockPattern.WRITE_INODE);
+      // CSA-22628: a recursive setAcl committed the journal synchronously once per inode.
+      // RecursiveInodeIterator closes the previous LockedInodePath on every advance, and
+      // LockedInodePath#close flushes the journal context while
+      // alluxio.master.filesystem.merge.inode.journals is on. Sampling a master during a live
+      // backfill found the walking thread parked in AsyncJournalWriter$FlushTicket.block in 23 of
+      // 25 dumps at 1.3% CPU: one raft round trip per inode, ~2.4ms, essentially the whole
+      // runtime. The metastore work itself measures 12us/inode (SetAclRateProbeTest).
+      //
+      // Metadata sync hit exactly this, and upstream's answer is
+      // MetadataSyncMergeJournalContext, whose flush() appends to the async journal writer
+      // without waiting for the commit. That preserves the ordering guarantee described on
+      // LockedInodePath#mJournalContext -- the append still happens before the path's locks are
+      // released, so a competing writer to the same inode cannot commit ahead of us -- and moves
+      // only the blocking wait off the per-inode path. setAclRecursive then commits for real
+      // every alluxio.master.recursive.operation.journal.force.flush.max.entries entries, which
+      // is what that property was always meant to govern.
+      RpcContext walkContext =
+          deferJournalCommits(rpcContext, context.getOptions().getRecursive());
       try (LockedInodePath inodePath =
-               mInodeTree.lockInodePath(lockingScheme, rpcContext.getJournalContext());
+               mInodeTree.lockInodePath(lockingScheme, walkContext.getJournalContext());
       ) {
         mPermissionChecker.checkSetAttributePermission(inodePath, false, true, false);
         // CSA-22628: the recursive permission check used to happen here, in its own
@@ -3799,7 +3818,7 @@ public class DefaultFileSystemMaster extends CoreMaster
               .PATH_DOES_NOT_EXIST.getMessage(path));
         }
         try {
-          setAclInternal(rpcContext, action, inodePath, entries, context);
+          setAclInternal(walkContext, action, inodePath, entries, context);
         } catch (AccessControlException e) {
           auditContext.setAllowed(false);
           throw e;
@@ -3847,6 +3866,52 @@ public class DefaultFileSystemMaster extends CoreMaster
       default:
     }
     setAclRecursive(rpcContext, action, inodePath, entries, false, opTimeMs, context);
+  }
+
+  /**
+   * Returns an {@link RpcContext} whose journal context appends entries to the async journal
+   * writer without blocking for them to be committed, for use by a recursive walk.
+   *
+   * Every {@link LockedInodePath#close()} during a walk flushes the journal context, and with a
+   * {@link FileSystemMergeJournalContext} that flush is a synchronous raft commit. Over millions
+   * of inodes that becomes the dominant cost of the entire operation. The append-only context
+   * preserves ordering, because the append still happens before the path's locks are released;
+   * only the wait for the commit is deferred, to {@link #commitJournals(RpcContext)}.
+   *
+   * The returned context must NOT be closed. It shares the caller's block deletion context, and
+   * {@link RpcContext#close()} would close that as well as the journal context, both of which the
+   * caller still owns. This mirrors InodeSyncStream#getMetadataSyncRpcContext.
+   *
+   * @param rpcContext the operation's own context
+   * @param recursive whether this operation walks descendants
+   * @return a context that defers journal commits, or {@code rpcContext} unchanged
+   */
+  private RpcContext deferJournalCommits(RpcContext rpcContext, boolean recursive) {
+    JournalContext journalContext = rpcContext.getJournalContext();
+    if (!recursive || !(journalContext instanceof FileSystemMergeJournalContext)
+        || journalContext instanceof MetadataSyncMergeJournalContext) {
+      return rpcContext;
+    }
+    return new RpcContext(rpcContext.getBlockDeletionContext(),
+        new MetadataSyncMergeJournalContext(
+            ((FileSystemMergeJournalContext) journalContext).getUnderlyingJournalContext(),
+            new FileSystemJournalEntryMerger()),
+        rpcContext.getOperationContext());
+  }
+
+  /**
+   * Commits the journal entries buffered so far, bounding both the memory the operation holds and
+   * the window over which a standby master can lag the primary.
+   *
+   * @param rpcContext the context the walk is using
+   */
+  private void commitJournals(RpcContext rpcContext) throws UnavailableException {
+    JournalContext journalContext = rpcContext.getJournalContext();
+    if (journalContext instanceof MetadataSyncMergeJournalContext) {
+      ((MetadataSyncMergeJournalContext) journalContext).hardFlush();
+    } else {
+      journalContext.flush();
+    }
   }
 
   private void setUfsAcl(LockedInodePath inodePath)
@@ -4038,10 +4103,16 @@ public class DefaultFileSystemMaster extends CoreMaster
           journalFlushCounter++;
           if (mMergeInodeJournals
               && journalFlushCounter > mRecursiveOperationForceFlushEntries) {
-            rpcContext.getJournalContext().flush();
+            // A real commit. Before CSA-22628 this was dead code: LockedInodePath#close had
+            // already committed on every single inode, so nothing was ever left buffered by the
+            // time this fired.
+            commitJournals(rpcContext);
             journalFlushCounter = 0;
           }
         }
+        // Commit the tail of the walk, so the operation has an explicit durability boundary
+        // instead of relying on the enclosing journal context's close.
+        commitJournals(rpcContext);
       } catch (InvalidPathException e) {
         // traverse() only fails if the tree changed under the iterator, which the write locks
         // above are meant to prevent. Surface it rather than silently applying a partial ACL.
