@@ -15,10 +15,10 @@
   <parent>
     <groupId>org.alluxio</groupId>
     <artifactId>alluxio-parent</artifactId>
-    <version>2.9.5</version>
+    <version>2.9.6</version>
   </parent>
   <artifactId>alluxio-webui</artifactId>
-  <version>2.9.5</version>
+  <version>2.9.6</version>
   <packaging>pom</packaging>
   <name>Alluxio UI</name>
   <description>Alluxio web UI pom</description>
@@ -114,6 +114,20 @@
                 <argument>build</argument>
                 <argument>--</argument>
                 <argument>--production  --no-save --no-package-lock --no-shrinkwrap</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>trim-legacy-release-ufs-jars</id>
+            <phase>install</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>sh</executable>
+              <arguments>
+                <argument>-c</argument>
+                <argument>rm -f ${project.parent.basedir}/lib/alluxio-underfs-hadoop-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-2*.jar ${project.parent.basedir}/lib/alluxio-underfs-hdfs-3.2*.jar ${project.parent.basedir}/lib/alluxio-underfs-*ozone*.jar ${project.parent.basedir}/lib/alluxio-underfs-cephfs-hadoop-*.jar ${project.parent.basedir}/lib/alluxio-underfs-hadoop-cosn-*.jar ${project.parent.basedir}/lib/alluxio-underfs-wasb-*.jar ${project.parent.basedir}/lib/alluxio-underfs-abfs-*.jar ${project.parent.basedir}/lib/alluxio-underfs-adl-*.jar ${project.parent.basedir}/lib/alluxio-underfs-obs-*.jar ${project.parent.basedir}/lib/alluxio-underfs-oss-*.jar ${project.parent.basedir}/lib/alluxio-integration-tools-hms-*.jar</argument>
               </arguments>
             </configuration>
           </execution>

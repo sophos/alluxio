@@ -24,6 +24,9 @@ metadata:
     chart: {{ $chart }}
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 data:
   metrics.properties: |-
     {{- if .Values.metrics.ConsoleSink.enabled }}

@@ -57,22 +57,22 @@ type module struct {
 
 // ufsModules is a map from ufs module to information for building the module.
 var ufsModules = map[string]module{
-	"ufs-hadoop-2.2":  {"hadoop-2.2", "hdfs", true, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.2.0"},
+	"ufs-hadoop-2.2":  {"hadoop-2.2", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.2.0"},
 	"ufs-hadoop-2.3":  {"hadoop-2.3", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.3.0"},
 	"ufs-hadoop-2.4":  {"hadoop-2.4", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.4.1"},
 	"ufs-hadoop-2.5":  {"hadoop-2.5", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.5.2"},
 	"ufs-hadoop-2.6":  {"hadoop-2.6", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.6.5 -PhdfsActiveSync"},
-	"ufs-hadoop-2.7":  {"hadoop-2.7", "hdfs", true, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.7.3 -PhdfsActiveSync"},
-	"ufs-hadoop-2.8":  {"hadoop-2.8", "hdfs", true, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.8.5 -PhdfsActiveSync"},
-	"ufs-hadoop-2.9":  {"hadoop-2.9", "hdfs", true, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.9.2 -PhdfsActiveSync"},
-	"ufs-hadoop-2.10": {"hadoop-2.10", "hdfs", true, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.10.1 -PhdfsActiveSync"},
+	"ufs-hadoop-2.7":  {"hadoop-2.7", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.7.3 -PhdfsActiveSync"},
+	"ufs-hadoop-2.8":  {"hadoop-2.8", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.8.5 -PhdfsActiveSync"},
+	"ufs-hadoop-2.9":  {"hadoop-2.9", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.9.2 -PhdfsActiveSync"},
+	"ufs-hadoop-2.10": {"hadoop-2.10", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-2 -Dufs.hadoop.version=2.10.1 -PhdfsActiveSync"},
 	"ufs-hadoop-3.0":  {"hadoop-3.0", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-3 -Dufs.hadoop.version=3.0.0 -PhdfsActiveSync"},
 	"ufs-hadoop-3.1":  {"hadoop-3.1", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-3 -Dufs.hadoop.version=3.1.1 -PhdfsActiveSync"},
-	"ufs-hadoop-3.2":  {"hadoop-3.2", "hdfs", true, "-pl underfs/hdfs -Pufs-hadoop-3 -Dufs.hadoop.version=3.2.1 -PhdfsActiveSync"},
+	"ufs-hadoop-3.2":  {"hadoop-3.2", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-3 -Dufs.hadoop.version=3.2.1 -PhdfsActiveSync"},
 	"ufs-hadoop-3.3":  {"hadoop-3.3", "hdfs", false, "-pl underfs/hdfs -Pufs-hadoop-3 -Dufs.hadoop.version=3.3.4 -PhdfsActiveSync"},
 
-	"ufs-hadoop-ozone-1.2.1":      {"hadoop-ozone-1.2.1", "ozone", true, "-pl underfs/ozone -Pufs-hadoop-3 -Dufs.ozone.version=1.2.1"},
-	"ufs-hadoop-cosn-3.1.0-5.8.5": {"hadoop-cosn-3.1.0-5.8.5", "cosn", true, "-pl underfs/cosn -Dufs.cosn.version=3.1.0-5.8.5"},
+	"ufs-hadoop-ozone-1.2.1":      {"hadoop-ozone-1.2.1", "ozone", false, "-pl underfs/ozone -Pufs-hadoop-3 -Dufs.ozone.version=1.2.1"},
+	"ufs-hadoop-cosn-3.1.0-5.8.5": {"hadoop-cosn-3.1.0-5.8.5", "cosn", false, "-pl underfs/cosn -Dufs.cosn.version=3.1.0-5.8.5"},
 }
 
 var fuseUfsModuleNames = []string{
@@ -99,6 +99,24 @@ var libJars = map[string]struct{}{
 	"underfs-web":           {},
 }
 
+// Sophos-only set: ship only the underfs and integration jars that the
+// Sophos Central deployment actually loads at runtime.  The helm chart
+// configures Alluxio with `alluxio.underfs.s3.*` (S3 via underfs-s3a),
+// the on-node SSD cache tier uses underfs-local, and the validation
+// tool is the standard pre-flight diagnostic.  Every other underfs
+// connector (CephFS, Tencent COS, GCS, Swift, HTTP) is dead weight in
+// this fork; dropping them from defaultLibJars keeps the tarball and
+// the resulting OCI image lean and reduces dependency-driven CVE
+// surface (e.g. underfs-gcs bundles a vulnerable protobuf-java).  The
+// jars are still produced by the Maven reactor via underfs/pom.xml,
+// just not copied into alluxio-<ver>-bin.tar.gz by the Go packager.
+var defaultLibJars = map[string]struct{}{
+	"integration-tools-validation": {},
+
+	"underfs-local": {},
+	"underfs-s3a":   {},
+}
+
 var fuseLibJars = map[string]struct{}{
 	"underfs-s3a":   {},
 	"underfs-local": {},
@@ -119,6 +137,15 @@ func defaultModules(modules map[string]module) []string {
 		if modules[moduleName].isDefault {
 			result = append(result, moduleName)
 		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func defaultLibJarNames() []string {
+	result := []string{}
+	for jarName := range defaultLibJars {
+		result = append(result, jarName)
 	}
 	sort.Strings(result)
 	return result

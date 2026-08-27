@@ -31,6 +31,35 @@ Create chart name and version as used by the chart label.
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/*
+Caller-supplied opaque map of labels applied to every resource that already
+emits a metadata.labels block AND to every pod template that already emits
+labels. Empty/absent .Values.commonLabels → emits nothing (call sites
+`with`-gate the output so the labels stanza stays clean).
+
+Deliberately NOT applied to:
+  - selector.matchLabels / spec.selector.matchLabels
+    Selectors are immutable on workloads (Deployment/StatefulSet/DaemonSet)
+    and are validated as a strict-match subset of pod template labels —
+    you can add labels to a pod template that aren't in the selector
+    (safe), but not the inverse. Keeping the selector key set fixed at
+    {app, role, name, …} preserves rollout safety on upgrade.
+  - resources that ship without any metadata.labels today (a few CSI
+    helpers: csi/driver, csi/storage-class, csi/pvc*, csi/controller-rbac).
+    Intentionally additive — wiring commonLabels into them would silently
+    introduce new label keys on upgrade for any deployment that's been
+    relying on their no-labels surface.
+
+Caller decides what the map contains (platform tags, datadog service,
+team identifiers, etc.) — the chart treats it as a passthrough and adds
+no auto-derivation, validation, or default keys.
+*/}}
+{{- define "alluxio.commonLabels" -}}
+{{- with .Values.commonLabels -}}
+{{ toYaml . }}
+{{- end -}}
+{{- end -}}
+
 {{- define "alluxio.jobWorker.resources" -}}
 resources:
   limits:
@@ -401,18 +430,30 @@ Extra volume mounts that can be added to a container
   {{- range $volMount := .extraVolumeMounts }}
 - name: {{ $volMount.name }}
   mountPath: {{ $volMount.mountPath }}
+  {{- if hasKey $volMount "readOnly" }}
   readOnly: {{ $volMount.readOnly }}
+  {{- end }}
   {{- end }}
 {{- end -}}
 
 {{/*
-Extra volumes that can be added to a pod
-@param .extraVolumes    An object representing a list of volume mounts.
-                        Can use either configMap or emptyDir.
+Extra volumes that can be added to a pod.
+
+Sophos fork (CSA-21750): extended upstream helper to also accept a
+`projected` key so callers can mount projected ServiceAccount tokens
+(required for the K8sTokenLoginModule used by CUSTOM auth — legacy SA
+tokens at /var/run/secrets/kubernetes.io/serviceaccount/token cannot
+carry a custom audience). The `configMap` / `emptyDir` branches below
+are the untouched upstream behaviour.
+
+@param .extraVolumes    An object representing a list of volumes.
+                        Can use configMap, projected, or emptyDir.
                         Each volume can contain the following fields:
                             volume.name
                             volume.configMap.defaultMode
                             volume.configMap.name
+                            volume.projected.defaultMode
+                            volume.projected.sources          (raw passthrough)
                             volume.emptyDir
 */}}
 {{- define "alluxio.extraVolumes" -}}
@@ -426,6 +467,13 @@ Extra volumes that can be added to a pod
     {{- if $vol.configMap.name }}
     name: {{ $vol.configMap.name }}
     {{- end}}
+  {{- else if $vol.projected }}
+  projected:
+    {{- if $vol.projected.defaultMode }}
+    defaultMode: {{ $vol.projected.defaultMode }}
+    {{- end }}
+    sources:
+{{ toYaml $vol.projected.sources | indent 4 }}
   {{- else }}
   emptyDir: {{ $vol.emptyDir | default "{}" }}
   {{- end }}
@@ -547,4 +595,29 @@ Extra container specs that can be added to a pod
     {{- end }}
   {{- end }}
   {{- end }}
+{{- end -}}
+
+{{/*
+Sophos fork (CSA-21950): extra initContainers that can be added to a pod.
+
+Deliberately NOT matching the field-by-field enumeration style used by
+`alluxio.extraContainers` above. InitContainers are typically one-shot
+setup tasks (chown a hostPath, prefetch an artifact, run a migration)
+whose specs need access to arbitrary container fields the upstream
+helper doesn't model -- securityContext.runAsNonRoot, securityContext
+.capabilities, lifecycle, workingDir, full shell-glued command strings,
+etc. A `tpl + toYaml` passthrough gives callers the full v1.Container
+schema without forcing the chart to grow a new branch every time
+someone wants a field we didn't predict.
+
+`tpl` is evaluated against the chart's root context ($), so callers can
+reference values like `{{ .Values.image }}:{{ .Values.imageTag }}` from
+inside their initContainer spec to share the alluxio image without
+repeating the pin.
+
+@param .extraInitContainers   List of full v1.Container specs.
+@param .ctx                   Root chart context (for `tpl` evaluation).
+*/}}
+{{- define "alluxio.extraInitContainers" -}}
+{{- tpl (toYaml .extraInitContainers) .ctx }}
 {{- end -}}

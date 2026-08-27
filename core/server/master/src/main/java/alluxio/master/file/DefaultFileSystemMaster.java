@@ -107,6 +107,7 @@ import alluxio.master.file.meta.InodeDirectory;
 import alluxio.master.file.meta.InodeDirectoryIdGenerator;
 import alluxio.master.file.meta.InodeDirectoryView;
 import alluxio.master.file.meta.InodeFile;
+import alluxio.master.file.meta.InodeIterationResult;
 import alluxio.master.file.meta.InodeLockManager;
 import alluxio.master.file.meta.InodePathPair;
 import alluxio.master.file.meta.InodeTree;
@@ -125,12 +126,15 @@ import alluxio.master.journal.FileSystemMergeJournalContext;
 import alluxio.master.journal.JournalContext;
 import alluxio.master.journal.Journaled;
 import alluxio.master.journal.JournaledGroup;
+import alluxio.master.journal.MetadataSyncMergeJournalContext;
 import alluxio.master.journal.NoopJournalContext;
 import alluxio.master.journal.checkpoint.CheckpointName;
 import alluxio.master.journal.ufs.UfsJournalSystem;
 import alluxio.master.metastore.DelegatingReadOnlyInodeStore;
 import alluxio.master.metastore.InodeStore;
 import alluxio.master.metastore.ReadOnlyInodeStore;
+import alluxio.master.metastore.ReadOption;
+import alluxio.master.metastore.SkippableInodeIterator;
 import alluxio.master.metrics.TimeSeriesStore;
 import alluxio.master.scheduler.DefaultWorkerProvider;
 import alluxio.master.scheduler.JournaledJobMetaStore;
@@ -179,6 +183,7 @@ import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.executor.ExecutorServiceFactory;
 import alluxio.util.io.PathUtils;
+import alluxio.util.logging.SamplingLogger;
 import alluxio.util.proto.ProtoUtils;
 import alluxio.wire.BlockInfo;
 import alluxio.wire.BlockLocation;
@@ -254,6 +259,12 @@ import javax.annotation.concurrent.NotThreadSafe;
 public class DefaultFileSystemMaster extends CoreMaster
     implements FileSystemMaster, DelegatingJournaled {
   private static final Logger LOG = LoggerFactory.getLogger(DefaultFileSystemMaster.class);
+  /**
+   * For warnings that would otherwise fire once per inode of a recursive walk. See the use in
+   * {@link #setUfsAcl(LockedInodePath)}.
+   */
+  private static final Logger SAMPLING_LOG =
+      new SamplingLogger(LOG, 30L * Constants.SECOND_MS);
   private static final Set<Class<? extends Server>> DEPS = ImmutableSet.of(BlockMaster.class);
 
   /** The number of threads to use in the {@link #mPersistCheckerPool}. */
@@ -3765,26 +3776,53 @@ public class DefaultFileSystemMaster extends CoreMaster
       LockingScheme lockingScheme =
           createLockingScheme(path, context.getOptions().getCommonOptions(),
               LockPattern.WRITE_INODE);
+      // CSA-22628: a recursive setAcl committed the journal synchronously once per inode.
+      // RecursiveInodeIterator closes the previous LockedInodePath on every advance, and
+      // LockedInodePath#close flushes the journal context while
+      // alluxio.master.filesystem.merge.inode.journals is on. Sampling a master during a live
+      // backfill found the walking thread parked in AsyncJournalWriter$FlushTicket.block in 23 of
+      // 25 dumps at 1.3% CPU: one raft round trip per inode, ~2.4ms, essentially the whole
+      // runtime. The metastore work itself measures 12us/inode (SetAclRateProbeTest).
+      //
+      // Metadata sync hit exactly this, and upstream's answer is
+      // MetadataSyncMergeJournalContext, whose flush() appends to the async journal writer
+      // without waiting for the commit. That preserves the ordering guarantee described on
+      // LockedInodePath#mJournalContext -- the append still happens before the path's locks are
+      // released, so a competing writer to the same inode cannot commit ahead of us -- and moves
+      // only the blocking wait off the per-inode path. setAclRecursive then commits for real
+      // every alluxio.master.recursive.operation.journal.force.flush.max.entries entries, which
+      // is what that property was always meant to govern.
+      RpcContext walkContext =
+          deferJournalCommits(rpcContext, context.getOptions().getRecursive());
       try (LockedInodePath inodePath =
-               mInodeTree.lockInodePath(lockingScheme, rpcContext.getJournalContext());
+               mInodeTree.lockInodePath(lockingScheme, walkContext.getJournalContext());
       ) {
         mPermissionChecker.checkSetAttributePermission(inodePath, false, true, false);
-        if (context.getOptions().getRecursive()) {
-          try (LockedInodePathList descendants = mInodeTree.getDescendants(inodePath)) {
-            for (LockedInodePath child : descendants) {
-              mPermissionChecker.checkSetAttributePermission(child, false, true, false);
-            }
-          } catch (AccessControlException e) {
-            auditContext.setAllowed(false);
-            throw e;
-          }
-        }
-
+        // CSA-22628: the recursive permission check used to happen here, in its own
+        // mInodeTree.getDescendants() pass, and setAclRecursive then walked the subtree a SECOND
+        // time to apply. Each pass materialised an ArrayList holding a WRITE_EDGE lock on every
+        // descendant -- measured at ~764 bytes each, so ~3.2GB on charlie's 4.5M-path mount
+        // against a 5GB master heap. The check is now fused into the single streaming walk in
+        // setAclRecursive, which is also what deleteInternal does with its own recursive
+        // permission check.
+        //
+        // Behaviour change worth reviewing: the check is no longer completed for the whole
+        // subtree before any inode is modified, so an AccessControlException raised deep in the
+        // walk now leaves the inodes visited before it already updated. The operation was never
+        // atomic -- journals are force-flushed every
+        // alluxio.master.recursive.operation.journal.force.flush.max.entries entries, so partial
+        // state was already observable -- and re-applying ACLs is idempotent, so a retry after
+        // fixing permissions converges.
         if (!inodePath.fullPathExists()) {
           throw new FileDoesNotExistException(ExceptionMessage
               .PATH_DOES_NOT_EXIST.getMessage(path));
         }
-        setAclInternal(rpcContext, action, inodePath, entries, context);
+        try {
+          setAclInternal(walkContext, action, inodePath, entries, context);
+        } catch (AccessControlException e) {
+          auditContext.setAllowed(false);
+          throw e;
+        }
         auditContext.setSucceeded(true);
       }
     }
@@ -3792,7 +3830,7 @@ public class DefaultFileSystemMaster extends CoreMaster
 
   private void setAclInternal(RpcContext rpcContext, SetAclAction action, LockedInodePath inodePath,
       List<AclEntry> entries, SetAclContext context)
-      throws IOException, FileDoesNotExistException {
+      throws IOException, FileDoesNotExistException, AccessControlException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
 
     long opTimeMs = mClock.millis();
@@ -3830,18 +3868,74 @@ public class DefaultFileSystemMaster extends CoreMaster
     setAclRecursive(rpcContext, action, inodePath, entries, false, opTimeMs, context);
   }
 
+  /**
+   * Returns an {@link RpcContext} whose journal context appends entries to the async journal
+   * writer without blocking for them to be committed, for use by a recursive walk.
+   *
+   * Every {@link LockedInodePath#close()} during a walk flushes the journal context, and with a
+   * {@link FileSystemMergeJournalContext} that flush is a synchronous raft commit. Over millions
+   * of inodes that becomes the dominant cost of the entire operation. The append-only context
+   * preserves ordering, because the append still happens before the path's locks are released;
+   * only the wait for the commit is deferred, to {@link #commitJournals(RpcContext)}.
+   *
+   * The returned context must NOT be closed. It shares the caller's block deletion context, and
+   * {@link RpcContext#close()} would close that as well as the journal context, both of which the
+   * caller still owns. This mirrors InodeSyncStream#getMetadataSyncRpcContext.
+   *
+   * @param rpcContext the operation's own context
+   * @param recursive whether this operation walks descendants
+   * @return a context that defers journal commits, or {@code rpcContext} unchanged
+   */
+  private RpcContext deferJournalCommits(RpcContext rpcContext, boolean recursive) {
+    JournalContext journalContext = rpcContext.getJournalContext();
+    if (!recursive || !(journalContext instanceof FileSystemMergeJournalContext)
+        || journalContext instanceof MetadataSyncMergeJournalContext) {
+      return rpcContext;
+    }
+    return new RpcContext(rpcContext.getBlockDeletionContext(),
+        new MetadataSyncMergeJournalContext(
+            ((FileSystemMergeJournalContext) journalContext).getUnderlyingJournalContext(),
+            new FileSystemJournalEntryMerger()),
+        rpcContext.getOperationContext());
+  }
+
+  /**
+   * Commits the journal entries buffered so far, bounding both the memory the operation holds and
+   * the window over which a standby master can lag the primary.
+   *
+   * @param rpcContext the context the walk is using
+   */
+  private void commitJournals(RpcContext rpcContext) throws UnavailableException {
+    JournalContext journalContext = rpcContext.getJournalContext();
+    if (journalContext instanceof MetadataSyncMergeJournalContext) {
+      ((MetadataSyncMergeJournalContext) journalContext).hardFlush();
+    } else {
+      journalContext.flush();
+    }
+  }
+
   private void setUfsAcl(LockedInodePath inodePath)
       throws InvalidPathException, AccessControlException {
     Inode inode = inodePath.getInodeOrNull();
 
-    checkUfsMode(inodePath.getUri(), OperationType.WRITE);
+    // CSA-22628: resolve once. This used to call checkUfsMode(uri, ...), which resolves the mount
+    // itself, and then resolve a second time. MountTable#resolve is not free: it takes the mount
+    // table read lock, builds the list of every possible mount point for the path, and acquires a
+    // UFS resource of its own to resolve the URI. Two of those per inode, on a walk of millions.
     MountTable.Resolution resolution = mMountTable.resolve(inodePath.getUri());
+    checkUfsMode(resolution, OperationType.WRITE);
     String ufsUri = resolution.getUri().toString();
     try (CloseableResource<UnderFileSystem> ufsResource = resolution.acquireUfsResource()) {
       UnderFileSystem ufs = ufsResource.get();
       if (ufs.isObjectStorage()) {
-        LOG.warn("SetACL is not supported to object storage UFS via Alluxio. "
-            + "UFS: " + ufsUri + ". This has no effect on the underlying object.");
+        // Sampled, not once per inode. setAclRecursive hoists this decision out of its walk
+        // entirely (see subtreeSupportsUfsAcl), but a subtree spanning both object-storage and
+        // non-object-storage mounts still reaches here per inode. At 324 bytes a line an
+        // unsampled warning writes ~1.5GB and rolls the 10MB master log ~139 times on charlie's
+        // largest mount, overwriting the whole MaxBackupIndex=100 history exactly when it is
+        // wanted to diagnose the operation that produced it.
+        SAMPLING_LOG.warn("SetACL is not supported to object storage UFS via Alluxio. UFS: {}. "
+            + "This has no effect on the underlying object.", ufsUri);
       } else {
         try {
           List<AclEntry> entries = new ArrayList<>(inode.getACL().getEntries());
@@ -3856,8 +3950,48 @@ public class DefaultFileSystemMaster extends CoreMaster
     }
   }
 
+  /**
+   * Whether any inode at or under the given path could need its ACL pushed to the under file
+   * system.
+   *
+   * {@link #setUfsAcl(LockedInodePath)} is a no-op for an object-storage UFS: it resolves the
+   * mount, acquires a UFS resource, logs a warning, and leaves the object untouched. Being object
+   * storage is a property of the mount rather than of the inode, so the question can be settled
+   * once per operation in O(number of mounts) instead of once per inode.
+   *
+   * Returns true if the mount holding {@code uri}, or any mount nested under it, is not object
+   * storage. A subtree can span several mounts with different UFS types, so a single non-object
+   * mount anywhere beneath it means the per-inode call is still required.
+   *
+   * @param uri the root of the subtree about to be walked
+   * @return whether any mount in the subtree supports setting ACLs on the UFS
+   */
+  private boolean subtreeSupportsUfsAcl(AlluxioURI uri) throws InvalidPathException {
+    if (mountSupportsUfsAcl(uri)) {
+      return true;
+    }
+    for (MountInfo nested : mMountTable.findChildrenMountPoints(uri, false)) {
+      if (mountSupportsUfsAcl(nested.getAlluxioUri())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @param uri a path whose mount should be inspected
+   * @return whether that mount's UFS supports setting ACLs
+   */
+  private boolean mountSupportsUfsAcl(AlluxioURI uri) throws InvalidPathException {
+    try (CloseableResource<UnderFileSystem> ufsResource =
+             mMountTable.resolve(uri).acquireUfsResource()) {
+      return !ufsResource.get().isObjectStorage();
+    }
+  }
+
   private void setAclSingleInode(RpcContext rpcContext, SetAclAction action,
-      LockedInodePath inodePath, List<AclEntry> entries, boolean replay, long opTimeMs)
+      LockedInodePath inodePath, List<AclEntry> entries, boolean replay, long opTimeMs,
+      boolean ufsAclSupported)
       throws IOException, FileDoesNotExistException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
 
@@ -3893,7 +4027,7 @@ public class DefaultFileSystemMaster extends CoreMaster
         .build());
 
     try {
-      if (!replay && inode.isPersisted()) {
+      if (!replay && ufsAclSupported && inode.isPersisted()) {
         setUfsAcl(inodePath);
       }
     } catch (InvalidPathException | AccessControlException e) {
@@ -3904,22 +4038,110 @@ public class DefaultFileSystemMaster extends CoreMaster
 
   private void setAclRecursive(RpcContext rpcContext, SetAclAction action,
       LockedInodePath inodePath, List<AclEntry> entries, boolean replay, long opTimeMs,
-      SetAclContext context) throws IOException, FileDoesNotExistException {
+      SetAclContext context)
+      throws IOException, FileDoesNotExistException, AccessControlException {
     Preconditions.checkState(inodePath.getLockPattern().isWrite());
-    setAclSingleInode(rpcContext, action, inodePath, entries, replay, opTimeMs);
-    if (context.getOptions().getRecursive()) {
-      try (LockedInodePathList descendants = mInodeTree.getDescendants(inodePath)) {
+    boolean recursive = context.getOptions().getRecursive();
+    // CSA-22628: settle the UFS question once for the whole walk rather than once per inode.
+    // Only worth doing for the recursive case -- a single-inode call pays the per-inode path,
+    // whose cost is irrelevant at one inode.
+    boolean ufsAclSupported = true;
+    if (recursive) {
+      try {
+        ufsAclSupported = subtreeSupportsUfsAcl(inodePath.getUri());
+      } catch (InvalidPathException e) {
+        throw new IOException(e);
+      }
+      if (!ufsAclSupported) {
+        LOG.warn("SetACL is not supported for the object storage UFS under {}. This recursive "
+            + "operation updates Alluxio metadata only and leaves the underlying objects "
+            + "unchanged; the per-inode warning is suppressed for the rest of the walk.",
+            inodePath.getUri());
+      }
+    }
+    setAclSingleInode(rpcContext, action, inodePath, entries, replay, opTimeMs, ufsAclSupported);
+    if (recursive) {
+      // POSIX default ACLs are a directory-only concept. Upstream
+      // setAclSingleInode throws UnsupportedOperationException on any default
+      // entry applied to a file, which makes `setfacl -R -m "...,default:..."`
+      // abort on the first file encountered in the descendant walk — even
+      // though the correct POSIX-recursive semantics (matching linux setfacl
+      // -R) are "apply default entries to directories, apply only access
+      // entries to files". Partition the entries list once and project it
+      // per-inode-type for each descendant. The non-recursive path (root
+      // inode above and any explicit single-target call) remains strict —
+      // explicitly targeting a file with `default:*` still raises, which is
+      // the user error the guard is there to catch.
+      List<AclEntry> accessOnlyEntries = null;
+      boolean hasDefaultEntries = entries.stream().anyMatch(AclEntry::isDefault);
+      if (hasDefaultEntries) {
+        accessOnlyEntries = entries.stream()
+            .filter(e -> !e.isDefault())
+            .collect(Collectors.toList());
+      }
+      // CSA-22628: process each descendant as it is reached and release it, instead of
+      // materialising the whole subtree first. See the comment on the permission pass in setAcl
+      // for the measured cost of the old behaviour.
+      try (SkippableInodeIterator descendants = mInodeStore.getSkippableChildrenIterator(
+          ReadOption.defaults(), DescendantType.ALL, false, inodePath)) {
         int journalFlushCounter = 0;
-        for (LockedInodePath childPath : descendants) {
+        long visitedCount = 0;
+        long skippedVanishedCount = 0;
+        while (descendants.hasNext()) {
           rpcContext.throwIfCancelled();
-          setAclSingleInode(rpcContext, action, childPath, entries, replay, opTimeMs);
+          InodeIterationResult descendant = descendants.next();
+          LockedInodePath childPath = descendant.getLockedPath();
+          // The iterator locks each child without traversing to it; traverse() completes the
+          // lock list. Same idiom as DefaultSyncProcess, the other consumer of this iterator.
+          childPath.traverse();
+          visitedCount++;
+          // CSA-22628: the iterator yields children from the listing taken when we descended
+          // into the parent and locks only the edge to each one (RecursiveInodeIterator#next
+          // passes shouldTraverse=false). traverse() re-reads the child from the store and
+          // returns early -- without throwing -- when it is already gone, so a short lock list
+          // here means the path was deleted between that listing and now. Skip it: no inode is
+          // left to hold an ACL, and a replacement created later inherits the parent's default
+          // ACL on metadata load, per security.authorization.sync.inherit-parent-acl. Only
+          // descendants are forgiven; the recursion root is applied before this loop, so a
+          // mistyped target still fails loudly.
+          if (!childPath.fullPathExists()) {
+            skippedVanishedCount++;
+            SAMPLING_LOG.warn("Recursive setAcl on {} is skipping descendant {}: it was deleted "
+                + "concurrently during the walk.", inodePath.getUri(), childPath.getUri());
+            continue;
+          }
+          // Fused permission check -- see the note in setAcl.
+          mPermissionChecker.checkSetAttributePermission(childPath, false, true, false);
+          List<AclEntry> effectiveEntries = entries;
+          if (hasDefaultEntries && descendant.getInode().isFile()) {
+            effectiveEntries = accessOnlyEntries;
+          }
+          setAclSingleInode(rpcContext, action, childPath, effectiveEntries, replay, opTimeMs,
+              ufsAclSupported);
           journalFlushCounter++;
           if (mMergeInodeJournals
               && journalFlushCounter > mRecursiveOperationForceFlushEntries) {
-            rpcContext.getJournalContext().flush();
+            // A real commit. Before CSA-22628 this was dead code: LockedInodePath#close had
+            // already committed on every single inode, so nothing was ever left buffered by the
+            // time this fired.
+            commitJournals(rpcContext);
             journalFlushCounter = 0;
           }
         }
+        // Commit the tail of the walk, so the operation has an explicit durability boundary
+        // instead of relying on the enclosing journal context's close.
+        commitJournals(rpcContext);
+        if (skippedVanishedCount > 0) {
+          LOG.warn("Recursive setAcl on {} skipped {} of {} descendants that were deleted "
+              + "concurrently during the walk. Replacements, if any, inherit the parent default "
+              + "ACL on metadata load.", inodePath.getUri(), skippedVanishedCount, visitedCount);
+        }
+      } catch (InvalidPathException e) {
+        // traverse() throws only for a structurally invalid path -- a component that is a file
+        // where a directory is required. A component that has merely been deleted makes it
+        // return early instead, which the fullPathExists() guard above handles. Surface this
+        // one rather than silently applying a partial ACL.
+        throw new IOException(e);
       }
     }
   }
@@ -5253,7 +5475,18 @@ public class DefaultFileSystemMaster extends CoreMaster
    */
   private void checkUfsMode(AlluxioURI alluxioPath, OperationType opType)
       throws AccessControlException, InvalidPathException {
-    MountTable.Resolution resolution = mMountTable.resolve(alluxioPath);
+    checkUfsMode(mMountTable.resolve(alluxioPath), opType);
+  }
+
+  /**
+   * Overload for callers that have already resolved the mount, so that the resolution -- which
+   * takes the mount table read lock and acquires a UFS resource -- is not repeated.
+   *
+   * @param resolution an already-computed mount table resolution
+   * @param opType the operation type
+   */
+  private void checkUfsMode(MountTable.Resolution resolution, OperationType opType)
+      throws AccessControlException {
     try (CloseableResource<UnderFileSystem> ufsResource = resolution.acquireUfsResource()) {
       UnderFileSystem ufs = ufsResource.get();
       UfsMode ufsMode =

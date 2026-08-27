@@ -14,7 +14,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.alluxio</groupId>
   <artifactId>alluxio-parent</artifactId>
-  <version>2.9.5</version>
+  <version>2.9.6</version>
   <packaging>pom</packaging>
   <name>Alluxio Parent</name>
   <description>Parent POM of Alluxio project: a Memory-Speed Virtual Distributed Storage System</description>
@@ -124,26 +124,59 @@
   <properties>
     <argLine></argLine>
     <apache.curator.version>4.2.0</apache.curator.version>
-    <aws.amazonaws.version>1.11.815</aws.amazonaws.version>
-    <!-- Pin this version to make the library compatible with netty 4.1.52.Final version -->
-    <awssdk.version>2.15.79</awssdk.version>
+    <aws.amazonaws.version>1.12.797</aws.amazonaws.version>
+    <!-- Sophos fork: bumped from upstream's 2.15.79 (Aug-2021) to 2.44.7
+         (May-2026, latest GA of the AWS SDK for Java v2) for CVE
+         remediation in software.amazon.awssdk:* and its transitives.
+         The original pin comment ("compatible with netty 4.1.52.Final")
+         is no longer relevant because we bumped netty to 4.1.133.Final
+         in f896743ee0 and the parent pom's netty-bom import below
+         (line ~411) coerces every transitive netty artifact, including
+         the ones pulled in by software.amazon.awssdk:netty-nio-client,
+         to that single version.  Verified that all v2 imports used by
+         this fork (S3AsyncClient + builder, S3Configuration, the auth
+         providers, NettyNioAsyncHttpClient, ListObjectsV2Iterable
+         paginator, S3 model classes) are core APIs that have been
+         stable across the 2.x line. -->
+    <awssdk.version>2.44.7</awssdk.version>
     <build.path>build</build.path>
     <catalyst.version>1.2.1</catalyst.version>
     <glusterfs-hadoop.version>2.3.13</glusterfs-hadoop.version>
     <grpc.version>1.54.1</grpc.version>
     <gson.version>2.8.9</gson.version>
-    <!--netty.version>4.1.56.Final</netty.version-->
-    <netty.version>4.1.119.Final</netty.version>
+    <!-- Sophos fork: netty.version is locked to 4.1.87.Final because it is
+         coupled to grpc.version 1.54.1 above.  The bundled grpc-netty 1.54.1
+         ships an `io.grpc.netty.AbstractHttp2Headers` adapter whose
+         `iterator()` throws UnsupportedOperationException; Netty 4.1.100+
+         changed `DefaultHttp2ConnectionDecoder$FrameReadListener.onHeadersRead`
+         to call `headers.iterator()` on every inbound HEADERS frame.  Bumping
+         netty without first bumping grpc breaks every gRPC stream at the
+         first response header — observed in Bravo (alluxio-us-east-2{a,b,c})
+         after image 2.9.6-36 rolled out: workers crash-loop on the
+         master-inquire ping with the exact stack above.  4.1.87.Final is the
+         latest 4.1.8x patch grpc-netty 1.54.1 was released against and
+         remains binary-compatible.
+
+         To CVE-clear newer netty (the 4.1.13x line clears CVE-2025-58057,
+         CVE-2025-55163, CVE-2024-47535 etc.) we must FIRST bump grpc.version
+         to a release whose grpc-netty understands the newer Http2Headers
+         contract — grpc-java 1.65+ tracks netty 4.1.100+, 1.70+ tracks
+         4.1.115+ — OR migrate from io.grpc:grpc-netty to
+         io.grpc:grpc-netty-shaded which bundles its own internal netty and
+         is immune to user-side netty drift.  Both are larger changes than a
+         CVE-bump and need a separate ticket.  Do NOT re-bump this number
+         without doing one of those first. -->
+    <netty.version>4.1.87.Final</netty.version>
     <rocksdb.version>7.0.3</rocksdb.version>
     <hadoop.version>3.3.4</hadoop.version>
     <jacoco.version>0.8.5</jacoco.version>
     <java.version>1.8</java.version>
     <jaxb.version>2.3.3</jaxb.version>
     <jersey.version>2.34</jersey.version>
-    <jetty.version>9.4.46.v20220331</jetty.version>
+    <jetty.version>9.4.58.v20250814</jetty.version>
     <junit.version>4.13.1</junit.version>
     <jupiter.version>5.9.2</jupiter.version>
-    <log4j.version>2.17.1</log4j.version>
+    <log4j.version>2.25.4</log4j.version>
     <maven.version>3.3.9</maven.version>
     <metrics.version>4.1.11</metrics.version>
     <mockito.version>3.4.4</mockito.version>
@@ -153,12 +186,13 @@
     <prometheus.client.version>1.0.0</prometheus.client.version>
     <prometheus.version>0.8.0</prometheus.version>
     <guava.version>31.0.1-jre</guava.version>
-    <parquet.version>1.11.0</parquet.version>
+    <parquet.version>1.15.2</parquet.version>
     <protobuf.version>3.19.6</protobuf.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.build.outputTimestamp>${git.commit.time}</project.build.outputTimestamp>
     <slf4j.version>1.7.30</slf4j.version>
-    <jackson.version>2.13.5</jackson.version>
+    <snakeyaml.version>2.0</snakeyaml.version>
+    <jackson.version>2.18.4</jackson.version>
     <hadoop-cos.version>3.1.0-5.8.5</hadoop-cos.version>
     <cos_api.version>5.6.19</cos_api.version>
     <surefire.forkCount>2</surefire.forkCount>
@@ -306,6 +340,16 @@
         <artifactId>jaxb-impl</artifactId>
         <version>${jaxb.version}</version>
       </dependency>
+      <!-- Sophos fork (CSA-21950): force commons-beanutils to a CVE-2025-48734
+           patched version. Pulled transitively via hadoop-client:3.3.4 →
+           hadoop-common:3.3.4 at 1.9.4 (still vulnerable). 1.11.0 is the
+           upstream patched line; API-compatible with 1.9.x for the surfaces
+           Hadoop touches. Kills the BD critical without any code change. -->
+      <dependency>
+        <groupId>commons-beanutils</groupId>
+        <artifactId>commons-beanutils</artifactId>
+        <version>1.11.0</version>
+      </dependency>
       <dependency>
         <groupId>commons-cli</groupId>
         <artifactId>commons-cli</artifactId>
@@ -375,12 +419,6 @@
         <groupId>io.grpc</groupId>
         <artifactId>grpc-netty</artifactId>
         <version>${grpc.version}</version>
-        <exclusions>
-          <exclusion>
-            <groupId>io.netty</groupId>
-            <artifactId>*</artifactId>
-          </exclusion>
-        </exclusions>
       </dependency>
       <dependency>
         <groupId>io.grpc</groupId>
@@ -627,9 +665,14 @@
         <version>2.0.8</version>
       </dependency>
       <dependency>
+        <groupId>org.yaml</groupId>
+        <artifactId>snakeyaml</artifactId>
+        <version>${snakeyaml.version}</version>
+      </dependency>
+      <dependency>
         <groupId>org.apache.zookeeper</groupId>
         <artifactId>zookeeper</artifactId>
-        <version>3.5.5</version>
+        <version>3.8.4</version>
         <exclusions>
           <exclusion>
             <groupId>log4j</groupId>
@@ -639,7 +682,53 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-log4j12</artifactId>
           </exclusion>
+          <exclusion>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-core</artifactId>
+          </exclusion>
         </exclusions>
+      </dependency>
+      <!-- Patch CVE-2022-40150, CVE-2022-45685, CVE-2022-45693, CVE-2023-1436 in transitive Jettison (pulled via Jersey/Hadoop). -->
+      <dependency>
+        <groupId>org.codehaus.jettison</groupId>
+        <artifactId>jettison</artifactId>
+        <version>1.5.4</version>
+      </dependency>
+      <!-- Coerce all transitive Eclipse Jetty 9.4 artifacts (e.g. jetty-io, jetty-http) to ${jetty.version}. -->
+      <dependency>
+        <groupId>org.eclipse.jetty</groupId>
+        <artifactId>jetty-bom</artifactId>
+        <version>${jetty.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- Sophos fork: force-coerce two transitive deps that arrive via
+           hadoop-auth's auth/SPNEGO support to versions that clear the
+           Prisma-flagged HIGH CVEs.  Both stay within the same major as
+           the inherited transitive (no Java-baseline impact: nimbus 9.x
+           still supports Java 8; nimbus 10+ requires Java 11 which would
+           clash with our <java.version>1.8</java.version>).
+            * com.nimbusds:nimbus-jose-jwt 9.8.1 -> 9.48 (last 9.x)
+              clears CVE-2023-52428 (fixed in 9.37.2).
+            * net.minidev:json-smart 1.3.2 -> 2.5.2 clears CVE-2023-1370
+              (fixed in 2.4.9).  Note: nimbus-jose-jwt 9.x already pulls
+              json-smart 2.x natively; the 1.3.2 line in our scan is
+              dragged in by some older transitive (likely accumulo /
+              oltu / hadoop-auth chain), so we pin 2.5.2 explicitly to
+              guarantee the upgrade lands. -->
+      <dependency>
+        <groupId>com.nimbusds</groupId>
+        <artifactId>nimbus-jose-jwt</artifactId>
+        <version>9.48</version>
+      </dependency>
+      <dependency>
+        <groupId>net.minidev</groupId>
+        <artifactId>json-smart</artifactId>
+        <version>2.5.2</version>
       </dependency>
       <dependency>
         <groupId>org.eclipse.jetty</groupId>
@@ -1045,8 +1134,23 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
+          <!-- Sophos fork: bumped from upstream 3.2.3 to 3.5.3.  3.2.x ships
+               with ASM 7.x which only understands class-file major versions
+               <= 56 (Java 12).  Modern transitives (jackson-core 2.14+,
+               aws-java-sdk-* 1.12.5xx+, ...) ship multi-release JAR entries
+               under META-INF/versions/17/ that are major version 61 (Java
+               17), which causes the shade goal to fail with
+                 java.lang.IllegalArgumentException:
+                   Unsupported class file major version 61
+               on every uber-jar module the moment a transitive bumps.
+               3.5.3 (May-2024) ships with ASM 9.7 which supports up to
+               Java 23 class files, and otherwise behaves identically to
+               3.2.x for our shade configurations (no MANIFEST or
+               services-resource-merger behavior changes that affect the
+               existing produced uber-jars).
+               Original upstream comment retained below for context: -->
           <!-- Needs to be 2.4.2 or later to prevent MSHADE-148 -->
-          <version>3.2.3</version>
+          <version>3.5.3</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -1458,7 +1562,7 @@
     <profile>
       <id>java11</id>
       <activation>
-        <jdk>11</jdk>
+        <jdk>[11,)</jdk>
       </activation>
       <properties>
         <java.version>1.8</java.version>

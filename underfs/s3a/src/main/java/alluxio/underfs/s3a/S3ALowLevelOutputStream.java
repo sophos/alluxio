@@ -15,22 +15,27 @@ import alluxio.conf.AlluxioConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.underfs.ObjectLowLevelOutputStream;
 
-import com.amazonaws.SdkClientException;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.internal.Mimetypes;
-import com.amazonaws.services.s3.model.AbortMultipartUploadRequest;
-import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadRequest;
-import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.model.PartETag;
-import com.amazonaws.services.s3.model.PutObjectRequest;
-import com.amazonaws.services.s3.model.UploadPartRequest;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.exception.SdkException;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.ServerSideEncryption;
+import software.amazon.awssdk.services.s3.model.StorageClass;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -41,18 +46,29 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
- * Object storage low output stream for aws s3.
+ * Object-storage low-level output stream for AWS S3, driving its own multipart upload through the
+ * SDK v2 sync {@link S3Client}. Rewritten on SDK v2 in Phase 2.2 (CSA-21975); the
+ * {@code PartETag} (v1) → {@link CompletedPart} (v2) rename is the visible change in the parts
+ * list.
  */
 @NotThreadSafe
 public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   private static final Logger LOG = LoggerFactory.getLogger(S3ALowLevelOutputStream.class);
+  private static final String OCTET_STREAM = "application/octet-stream";
 
   /** Server side encrypt enabled. */
   private final boolean mSseEnabled;
-  /** The Amazon S3 client to interact with S3. */
-  protected AmazonS3 mClient;
-  /** Tags for the uploaded part, provided by S3 after uploading. */
-  private final List<PartETag> mTags = Collections.synchronizedList(new ArrayList<>());
+  /**
+   * S3 storage class for every PUT / multipart init this stream issues. {@code null} means
+   * "leave the field off the request" — the bucket default applies. Configured once via
+   * {@link S3AUnderFileSystem#mStorageClass} on stream construction.
+   */
+  @Nullable
+  private final StorageClass mStorageClass;
+  /** The SDK v2 S3 client to interact with S3. */
+  protected S3Client mClient;
+  /** Completed parts collected as each {@link #uploadPartInternal} returns. */
+  private final List<CompletedPart> mTags = Collections.synchronizedList(new ArrayList<>());
 
   /** The upload id of this multipart upload. */
   protected volatile String mUploadId;
@@ -60,26 +76,38 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   private String mContentHash;
 
   /**
-   * Constructs a new stream for writing a file.
-   *
    * @param bucketName the name of the bucket
    * @param key the key of the file
-   * @param s3Client the Amazon S3 client to upload the file with
+   * @param s3Client the SDK v2 S3 client to upload the file with
    * @param executor a thread pool executor
    * @param ufsConf the object store under file system configuration
+   * @param storageClass S3 storage class for every PUT / multipart init this stream issues,
+   *                     or {@code null} to leave it off the request (bucket default applies)
    */
   public S3ALowLevelOutputStream(
       String bucketName,
       String key,
-      AmazonS3 s3Client,
+      S3Client s3Client,
       ListeningExecutorService executor,
-      AlluxioConfiguration ufsConf) {
+      AlluxioConfiguration ufsConf,
+      @Nullable StorageClass storageClass) {
     super(bucketName, key, executor,
         ufsConf.getBytes(PropertyKey.UNDERFS_S3_STREAMING_UPLOAD_PARTITION_SIZE), ufsConf);
     mClient = Preconditions.checkNotNull(s3Client);
     mSseEnabled = ufsConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED);
+    mStorageClass = storageClass;
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * <p>{@code md5} is intentionally ignored. S3 Express One Zone directory buckets reject
+   * {@code Content-MD5} with {@code HTTP 501 "This bucket does not support Content Md5 header"}
+   * (CSA-22413), and SDK v2 already attaches a CRC32 checksum by default, so the header is
+   * redundant on regular buckets too. The parameter stays in the signature because
+   * {@link alluxio.underfs.ObjectLowLevelOutputStream} declares it for every object-store
+   * implementation (COS, OSS, ...) — dropping it there is out of scope for the S3 module.
+   */
   @Override
   protected void uploadPartInternal(
       File file,
@@ -88,20 +116,18 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
       @Nullable String md5)
       throws IOException {
     try {
-      final UploadPartRequest uploadRequest = new UploadPartRequest()
-          .withBucketName(mBucketName)
-          .withKey(mKey)
-          .withUploadId(mUploadId)
-          .withPartNumber(partNumber)
-          .withFile(file)
-          .withPartSize(file.length());
-      if (md5 != null) {
-        uploadRequest.setMd5Digest(md5);
-      }
-      uploadRequest.setLastPart(isLastPart);
-      PartETag partETag = getClient().uploadPart(uploadRequest).getPartETag();
-      mTags.add(partETag);
-    } catch (SdkClientException e) {
+      UploadPartRequest.Builder reqBuilder = UploadPartRequest.builder()
+          .bucket(mBucketName)
+          .key(mKey)
+          .uploadId(mUploadId)
+          .partNumber(partNumber)
+          .contentLength(file.length());
+      // v1's UploadPartRequest.setLastPart(boolean) was client-side validation only;
+      // v2 doesn't model it. The server decides what's "last" at CompleteMultipartUpload time.
+      UploadPartResponse resp = getClient().uploadPart(reqBuilder.build(),
+          RequestBody.fromFile(file));
+      mTags.add(CompletedPart.builder().partNumber(partNumber).eTag(resp.eTag()).build());
+    } catch (SdkException e) {
       LOG.debug("failed to upload part.", e);
       throw new IOException(String.format(
           "failed to upload part. key: %s part number: %s uploadId: %s",
@@ -112,15 +138,19 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   @Override
   protected void initMultiPartUploadInternal() throws IOException {
     try {
-      ObjectMetadata meta = new ObjectMetadata();
+      CreateMultipartUploadRequest.Builder reqBuilder = CreateMultipartUploadRequest.builder()
+          .bucket(mBucketName)
+          .key(mKey)
+          .contentType(OCTET_STREAM);
       if (mSseEnabled) {
-        meta.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
+        reqBuilder.serverSideEncryption(ServerSideEncryption.AES256);
       }
-      meta.setContentType(Mimetypes.MIMETYPE_OCTET_STREAM);
-      mUploadId = getClient()
-          .initiateMultipartUpload(new InitiateMultipartUploadRequest(mBucketName, mKey, meta))
-          .getUploadId();
-    } catch (SdkClientException e) {
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
+      }
+      CreateMultipartUploadResponse resp = getClient().createMultipartUpload(reqBuilder.build());
+      mUploadId = resp.uploadId();
+    } catch (SdkException e) {
       LOG.debug("failed to init multi part upload", e);
       throw new IOException("failed to init multi part upload", e);
     }
@@ -130,9 +160,23 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   protected void completeMultiPartUploadInternal() throws IOException {
     try {
       LOG.debug("complete multi part {}", mUploadId);
-      mContentHash = getClient().completeMultipartUpload(new CompleteMultipartUploadRequest(
-          mBucketName, mKey, mUploadId, mTags)).getETag();
-    } catch (SdkClientException e) {
+      // S3 requires parts in ascending partNumber order at complete time. mTags is appended
+      // to as each part finishes which may not be in order under concurrent uploads, so sort
+      // defensively before sending.
+      List<CompletedPart> ordered;
+      synchronized (mTags) {
+        ordered = new ArrayList<>(mTags);
+      }
+      ordered.sort((a, b) -> Integer.compare(a.partNumber(), b.partNumber()));
+      CompleteMultipartUploadResponse resp = getClient().completeMultipartUpload(
+          CompleteMultipartUploadRequest.builder()
+              .bucket(mBucketName)
+              .key(mKey)
+              .uploadId(mUploadId)
+              .multipartUpload(CompletedMultipartUpload.builder().parts(ordered).build())
+              .build());
+      mContentHash = resp.eTag();
+    } catch (SdkException e) {
       LOG.debug("failed to complete multi part upload", e);
       throw new IOException(
           String.format("failed to complete multi part upload, key: %s, upload id: %s",
@@ -143,9 +187,12 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   @Override
   protected void abortMultiPartUploadInternal() throws IOException {
     try {
-      getClient().abortMultipartUpload(
-          new AbortMultipartUploadRequest(mBucketName, mKey, mUploadId));
-    } catch (SdkClientException e) {
+      getClient().abortMultipartUpload(AbortMultipartUploadRequest.builder()
+          .bucket(mBucketName)
+          .key(mKey)
+          .uploadId(mUploadId)
+          .build());
+    } catch (SdkException e) {
       LOG.debug("failed to abort multi part upload", e);
       throw new IOException(
           String.format("failed to abort multi part upload, key: %s, upload id: %s", mKey,
@@ -156,38 +203,49 @@ public class S3ALowLevelOutputStream extends ObjectLowLevelOutputStream {
   @Override
   protected void createEmptyObject(String key) throws IOException {
     try {
-      ObjectMetadata meta = new ObjectMetadata();
-      meta.setContentLength(0);
-      meta.setContentType(Mimetypes.MIMETYPE_OCTET_STREAM);
-      mContentHash = getClient().putObject(
-          new PutObjectRequest(mBucketName, key, new ByteArrayInputStream(new byte[0]), meta))
-          .getETag();
-    } catch (SdkClientException e) {
+      PutObjectRequest.Builder reqBuilder = PutObjectRequest.builder()
+          .bucket(mBucketName)
+          .key(key)
+          .contentLength(0L)
+          .contentType(OCTET_STREAM);
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
+      }
+      PutObjectResponse resp = getClient().putObject(reqBuilder.build(), RequestBody.empty());
+      mContentHash = resp.eTag();
+    } catch (SdkException e) {
       throw new IOException(e);
     }
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * <p>{@code md5} is intentionally ignored — see {@link #uploadPartInternal} for why.
+   */
   @Override
   protected void putObject(String key, File file, @Nullable String md5) throws IOException {
     try {
-      ObjectMetadata meta = new ObjectMetadata();
+      PutObjectRequest.Builder reqBuilder = PutObjectRequest.builder()
+          .bucket(mBucketName)
+          .key(key)
+          .contentLength(file.length())
+          .contentType(OCTET_STREAM);
       if (mSseEnabled) {
-        meta.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
+        reqBuilder.serverSideEncryption(ServerSideEncryption.AES256);
       }
-      if (md5 != null) {
-        meta.setContentMD5(md5);
+      if (mStorageClass != null) {
+        reqBuilder.storageClass(mStorageClass);
       }
-      meta.setContentLength(file.length());
-      meta.setContentType(Mimetypes.MIMETYPE_OCTET_STREAM);
-      PutObjectRequest putReq = new PutObjectRequest(mBucketName, key, file);
-      putReq.setMetadata(meta);
-      mContentHash = getClient().putObject(putReq).getETag();
+      PutObjectResponse resp = getClient().putObject(reqBuilder.build(),
+          RequestBody.fromFile(file));
+      mContentHash = resp.eTag();
     } catch (Exception e) {
       throw new IOException(e);
     }
   }
 
-  protected AmazonS3 getClient() {
+  protected S3Client getClient() {
     return mClient;
   }
 

@@ -58,7 +58,7 @@ public class MetadataSyncDepthV2Test extends MetadataSyncV2TestBase {
   @Test
   public void syncSingleDir() throws Throwable {
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET, TEST_DIRECTORY + "/", "");
+    putObject(TEST_BUCKET, TEST_DIRECTORY + "/", "");
 
     // Sync the dir
     AlluxioURI syncPath = MOUNT_POINT.join(TEST_DIRECTORY);
@@ -87,7 +87,7 @@ public class MetadataSyncDepthV2Test extends MetadataSyncV2TestBase {
   public void syncSingleDirNested() throws Throwable {
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
     String dirPath = TEST_DIRECTORY + "/" + TEST_DIRECTORY + "/";
-    mS3Client.putObject(TEST_BUCKET, dirPath, "");
+    putObject(TEST_BUCKET, dirPath, "");
 
     // Sync the dir
     AlluxioURI syncPath = MOUNT_POINT.join(TEST_DIRECTORY).join(TEST_DIRECTORY);
@@ -109,7 +109,7 @@ public class MetadataSyncDepthV2Test extends MetadataSyncV2TestBase {
     ));
 
     // Delete the dir
-    mS3Client.deleteObject(TEST_BUCKET, dirPath);
+    deleteObject(TEST_BUCKET, dirPath);
     result = mFileSystemMaster.getMetadataSyncer().syncPath(
         syncPath, mDescendantType, mDirectoryLoadType, 0).getBaseTask();
     result.waitComplete(TIMEOUT_MS);
@@ -145,7 +145,7 @@ public class MetadataSyncDepthV2Test extends MetadataSyncV2TestBase {
   @Test
   public void syncSingleFile() throws Throwable {
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET, TEST_DIRECTORY + "/" + TEST_FILE, TEST_CONTENT);
+    putObject(TEST_BUCKET, TEST_DIRECTORY + "/" + TEST_FILE, TEST_CONTENT);
 
     // Sync the file
     AlluxioURI syncPath = MOUNT_POINT.join(TEST_DIRECTORY).join(TEST_FILE);
@@ -167,7 +167,7 @@ public class MetadataSyncDepthV2Test extends MetadataSyncV2TestBase {
     ));
 
     // update the metadata for the path
-    mS3Client.putObject(TEST_BUCKET, TEST_DIRECTORY + "/" + TEST_FILE, TEST_CONTENT_MODIFIED);
+    putObject(TEST_BUCKET, TEST_DIRECTORY + "/" + TEST_FILE, TEST_CONTENT_MODIFIED);
 
     // Sync should see the change
     result = mFileSystemMaster.getMetadataSyncer().syncPath(
@@ -182,7 +182,7 @@ public class MetadataSyncDepthV2Test extends MetadataSyncV2TestBase {
         .get(mountPointInodeId).get().asDirectory().isDirectChildrenLoaded());
 
     // Delete the file
-    mS3Client.deleteObject(TEST_BUCKET, TEST_DIRECTORY + "/" + TEST_FILE);
+    deleteObject(TEST_BUCKET, TEST_DIRECTORY + "/" + TEST_FILE);
     // Sync the root, all should be removed
     result = mFileSystemMaster.getMetadataSyncer().syncPath(
         MOUNT_POINT, mDescendantType, mDirectoryLoadType, 0).getBaseTask();

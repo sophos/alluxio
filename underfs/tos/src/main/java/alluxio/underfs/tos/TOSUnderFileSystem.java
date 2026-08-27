@@ -13,6 +13,7 @@ package alluxio.underfs.tos;
 
 import alluxio.AlluxioURI;
 import alluxio.Constants;
+import alluxio.conf.AlluxioConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.retry.RetryPolicy;
 import alluxio.underfs.ObjectUnderFileSystem;
@@ -20,14 +21,21 @@ import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.options.OpenOptions;
 import alluxio.util.UnderFileSystemUtils;
+import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.io.PathUtils;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Suppliers;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
+import com.volcengine.tos.TOSClientConfiguration;
 import com.volcengine.tos.TOSV2;
 import com.volcengine.tos.TOSV2ClientBuilder;
 import com.volcengine.tos.TosClientException;
 import com.volcengine.tos.TosException;
 import com.volcengine.tos.TosServerException;
+import com.volcengine.tos.auth.StaticCredentials;
+import com.volcengine.tos.model.object.AbortMultipartUploadInput;
 import com.volcengine.tos.model.object.CopyObjectV2Input;
 import com.volcengine.tos.model.object.CopyObjectV2Output;
 import com.volcengine.tos.model.object.DeleteMultiObjectsV2Input;
@@ -37,13 +45,17 @@ import com.volcengine.tos.model.object.DeleteObjectOutput;
 import com.volcengine.tos.model.object.Deleted;
 import com.volcengine.tos.model.object.HeadObjectV2Input;
 import com.volcengine.tos.model.object.HeadObjectV2Output;
+import com.volcengine.tos.model.object.ListMultipartUploadsV2Input;
+import com.volcengine.tos.model.object.ListMultipartUploadsV2Output;
 import com.volcengine.tos.model.object.ListObjectsType2Input;
 import com.volcengine.tos.model.object.ListObjectsType2Output;
 import com.volcengine.tos.model.object.ListedCommonPrefix;
 import com.volcengine.tos.model.object.ListedObjectV2;
+import com.volcengine.tos.model.object.ListedUpload;
 import com.volcengine.tos.model.object.ObjectMetaRequestOptions;
 import com.volcengine.tos.model.object.ObjectTobeDeleted;
 import com.volcengine.tos.model.object.PutObjectInput;
+import com.volcengine.tos.transport.TransportConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +66,8 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -80,6 +94,8 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
    */
   private final String mBucketName;
 
+  private final Supplier<ListeningExecutorService> mStreamingUploadExecutor;
+
   /**
    * Constructs a new instance of {@link TOSUnderFileSystem}.
    *
@@ -87,8 +103,8 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
    * @param conf the configuration for this UFS
    * @return the created {@link TOSUnderFileSystem} instance
    */
-  public static TOSUnderFileSystem createInstance(AlluxioURI uri, UnderFileSystemConfiguration conf)
-      throws Exception {
+  public static TOSUnderFileSystem createInstance(AlluxioURI uri,
+                                                  UnderFileSystemConfiguration conf) {
     String bucketName = UnderFileSystemUtils.getBucketName(uri);
     Preconditions.checkArgument(conf.isSet(PropertyKey.TOS_ACCESS_KEY),
         "Property %s is required to connect to TOS", PropertyKey.TOS_ACCESS_KEY);
@@ -102,7 +118,13 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
     String secretKey = conf.getString(PropertyKey.TOS_SECRET_KEY);
     String regionName = conf.getString(PropertyKey.TOS_REGION);
     String endPoint = conf.getString(PropertyKey.TOS_ENDPOINT_KEY);
-    TOSV2 tos = new TOSV2ClientBuilder().build(regionName, endPoint, accessKey, secretKey);
+    TOSClientConfiguration configuration = TOSClientConfiguration.builder()
+        .transportConfig(initializeTOSClientConfig(conf))
+        .region(regionName)
+        .endpoint(endPoint)
+        .credentials(new StaticCredentials(accessKey, secretKey))
+        .build();
+    TOSV2 tos = new TOSV2ClientBuilder().build(configuration);
     return new TOSUnderFileSystem(uri, tos, bucketName, conf);
   }
 
@@ -119,6 +141,14 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
     super(uri, conf);
     mClient = tosClient;
     mBucketName = bucketName;
+    mStreamingUploadExecutor = Suppliers.memoize(() -> {
+      int numTransferThreads =
+          conf.getInt(PropertyKey.UNDERFS_TOS_STREAMING_UPLOAD_THREADS);
+      ExecutorService service = ExecutorServiceFactories
+          .fixedThreadPool("alluxio-tos-streaming-upload-worker",
+              numTransferThreads).create();
+      return MoreExecutors.listeningDecorator(service);
+    });
   }
 
   @Override
@@ -134,6 +164,38 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
   // No ACL integration currently, no-op
   @Override
   public void setMode(String path, short mode) throws IOException {
+  }
+
+  @Override
+  public void cleanup() {
+    long cleanAge = mUfsConf.getMs(PropertyKey.UNDERFS_TOS_INTERMEDIATE_UPLOAD_CLEAN_AGE);
+    Date cleanBefore = new Date(new Date().getTime() - cleanAge);
+    boolean isTruncated = true;
+    String keyMarker = null;
+    String uploadIdMarker = null;
+    int maxKeys = 10;
+    try {
+      while (isTruncated) {
+        ListMultipartUploadsV2Input input = new ListMultipartUploadsV2Input().setBucket(mBucketName)
+            .setMaxUploads(maxKeys).setKeyMarker(keyMarker).setUploadIDMarker(uploadIdMarker);
+        ListMultipartUploadsV2Output output = mClient.listMultipartUploads(input);
+        if (output.getUploads() != null) {
+          for (int i = 0; i < output.getUploads().size(); ++i) {
+            ListedUpload upload = output.getUploads().get(i);
+            if (upload.getInitiated().before(cleanBefore)) {
+              mClient.abortMultipartUpload(new AbortMultipartUploadInput().setBucket(mBucketName)
+                  .setKey(upload.getKey()).setUploadID(upload.getUploadID()));
+            }
+          }
+        }
+        isTruncated = output.isTruncated();
+        keyMarker = output.getNextKeyMarker();
+        uploadIdMarker = output.getNextUploadIdMarker();
+      }
+    } catch (TosException e) {
+      LOG.error("Failed to cleanup TOS uploads", e);
+      throw AlluxioTosException.from(e);
+    }
   }
 
   @Override
@@ -170,6 +232,10 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
 
   @Override
   protected OutputStream createObject(String key) throws IOException {
+    if (mUfsConf.getBoolean(PropertyKey.UNDERFS_TOS_STREAMING_UPLOAD_ENABLED)) {
+      return new TOSLowLevelOutputStream(mBucketName, key, mClient,
+          mStreamingUploadExecutor.get(), mUfsConf);
+    }
     return new TOSOutputStream(mBucketName, key, mClient,
         mUfsConf.getList(PropertyKey.TMP_DIRS));
   }
@@ -187,7 +253,7 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   @Override
-  protected List<String> deleteObjects(List<String> keys) throws IOException {
+  protected List<String> deleteObjects(List<String> keys) {
     try {
       List<ObjectTobeDeleted> list = new ArrayList<>();
       for (String key : keys) {
@@ -198,7 +264,8 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
       DeleteMultiObjectsV2Output output = mClient.deleteMultiObjects(input);
       return output.getDeleteds().stream().map(Deleted::getKey).collect(Collectors.toList());
     } catch (TosException e) {
-      throw new IOException("Failed to delete objects", e);
+      LOG.error("Failed to delete objects", e);
+      throw AlluxioTosException.from(e);
     }
   }
 
@@ -313,6 +380,7 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
       }
       throw AlluxioTosException.from(e);
     } catch (TosClientException e) {
+      LOG.error("Failed to get object status for {}", key, e);
       throw AlluxioTosException.from(e);
     }
   }
@@ -328,6 +396,29 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
     return Constants.HEADER_TOS + mBucketName;
   }
 
+  /**
+   * Creates an TOS {@code ClientConfiguration} using an Alluxio Configuration.
+   * @param alluxioConf the TOS Configuration
+   * @return the TOS {@link TransportConfig}
+   */
+  public static TransportConfig initializeTOSClientConfig(AlluxioConfiguration alluxioConf) {
+    int readTimeoutMills = alluxioConf.getInt(PropertyKey.UNDERFS_TOS_READ_TIMEOUT);
+    int writeTimeoutMills = alluxioConf.getInt(PropertyKey.UNDERFS_TOS_WRITE_TIMEOUT);
+    int connectionTimeoutMills = alluxioConf.getInt(PropertyKey.UNDERFS_TOS_CONNECT_TIMEOUT);
+    int maxConnections = alluxioConf.getInt(PropertyKey.UNDERFS_TOS_CONNECT_MAX);
+    int idleConnectionTime = alluxioConf.getInt(PropertyKey.UNDERFS_TOS_CONNECT_TTL);
+    int maxErrorRetry = alluxioConf.getInt(PropertyKey.UNDERFS_TOS_RETRY_MAX);
+    TransportConfig config = TransportConfig.builder()
+        .connectTimeoutMills(connectionTimeoutMills)
+        .maxConnections(maxConnections)
+        .maxRetryCount(maxErrorRetry)
+        .readTimeoutMills(readTimeoutMills)
+        .writeTimeoutMills(writeTimeoutMills)
+        .idleConnectionTimeMills(idleConnectionTime)
+        .build();
+    return config;
+  }
+
   @Override
   protected InputStream openObject(String key, OpenOptions options, RetryPolicy retryPolicy)
       throws IOException {
@@ -335,6 +426,7 @@ public class TOSUnderFileSystem extends ObjectUnderFileSystem {
       return new TOSInputStream(mBucketName, key, mClient, options.getOffset(), retryPolicy,
           mUfsConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
     } catch (TosException e) {
+      LOG.error("Failed to open object: {}", key, e);
       throw AlluxioTosException.from(e);
     }
   }

@@ -27,6 +27,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-worker
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
@@ -41,6 +44,9 @@ spec:
         release: {{ .Release.Name }}
         heritage: {{ .Release.Service }}
         role: alluxio-worker
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     {{- if or .Values.worker.podAnnotations .Values.metrics.enabled }}
       annotations:
       {{- with .Values.worker.podAnnotations }}
@@ -88,6 +94,31 @@ spec:
       {{- if .Values.imagePullSecrets }}
 {{ include "alluxio.imagePullSecrets" . | indent 6 }}
       {{- end}}
+      initContainers:
+      # Sophos fork (CSA-21750): seed baked /opt/alluxio/conf contents into a
+      # writable emptyDir so the worker/job-worker containers -- which run with
+      # readOnlyRootFilesystem: true (KSV-0014) -- can still write
+      # conf/log4j.properties and conf/alluxio-site.properties in entrypoint.sh.
+      - name: seed-alluxio-conf
+        image: {{ .Values.image }}:{{ .Values.imageTag }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        # `cp -R` (NOT `cp -a`) on purpose -- see master/statefulset.yaml seed
+        # initContainer for the full explanation. TL;DR: runAsUser:1000 can't
+        # call utimes() on the root-owned emptyDir mount point, so `cp -a`
+        # crashes at the end; `cp -R` avoids the syscall entirely.
+        command: ["sh", "-c", "cp -R /opt/alluxio/conf/. /mnt/alluxio-conf/"]
+        volumeMounts:
+          - name: alluxio-conf
+            mountPath: /mnt/alluxio-conf
+      # Sophos fork (CSA-21950): user-supplied initContainers run AFTER
+      # seed-alluxio-conf -- ordering matters because the seed step is what
+      # makes /opt/alluxio/conf writable for any subsequent setup that
+      # might want to drop files there. Keep this block last in
+      # initContainers: so the worker container always boots against a
+      # fully-prepared filesystem.
+      {{- if .Values.worker.extraInitContainers }}
+{{ include "alluxio.extraInitContainers" (dict "extraInitContainers" .Values.worker.extraInitContainers "ctx" $) | indent 6 }}
+      {{- end }}
       containers:
         {{- if .Values.worker.extraContainers }}
 {{ include "alluxio.extraContainers" (dict "extraContainers" .Values.worker.extraContainers) | indent 8 }}
@@ -95,6 +126,8 @@ spec:
         - name: alluxio-worker
           image: {{ .Values.image }}:{{ .Values.imageTag }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
           {{- if .Values.worker.resources  }}
 {{ include "alluxio.worker.resources" . | indent 10 }}
           {{- end }}
@@ -162,6 +195,15 @@ spec:
           - containerPort: {{ .Values.worker.ports.web }}
             name: web
           volumeMounts:
+            # Sophos fork (CSA-21750): writable overlays required by
+            # readOnlyRootFilesystem: true above. conf/ is seeded from the image
+            # by the seed-alluxio-conf initContainer.
+            - name: alluxio-conf
+              mountPath: /opt/alluxio/conf
+            - name: alluxio-logs
+              mountPath: /opt/alluxio/logs
+            - name: tmp
+              mountPath: /tmp
             {{- if .Values.worker.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.worker.extraVolumeMounts) | indent 12 }}
             {{- end }}
@@ -199,6 +241,8 @@ spec:
         - name: alluxio-job-worker
           image: {{ .Values.image }}:{{ .Values.imageTag }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
           {{- if .Values.jobWorker.resources  }}
 {{ include "alluxio.jobWorker.resources" . | indent 10 }}
           {{- end }}
@@ -257,6 +301,13 @@ spec:
           - containerPort: {{ .Values.jobWorker.ports.web }}
             name: job-web
           volumeMounts:
+            # Sophos fork (CSA-21750): writable overlays for readOnlyRootFilesystem.
+            - name: alluxio-conf
+              mountPath: /opt/alluxio/conf
+            - name: alluxio-logs
+              mountPath: /opt/alluxio/logs
+            - name: tmp
+              mountPath: /tmp
             {{- if .Values.worker.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.worker.extraVolumeMounts) | indent 12 }}
             {{- end }}
@@ -286,6 +337,16 @@ spec:
             {{- end }}
       restartPolicy: Always
       volumes:
+        # Sophos fork (CSA-21750): emptyDir volumes backing the writable
+        # overlays required by readOnlyRootFilesystem on the worker and
+        # job-worker containers. alluxio-conf is seeded from the baked image
+        # /opt/alluxio/conf by the seed-alluxio-conf initContainer.
+        - name: alluxio-conf
+          emptyDir: {}
+        - name: alluxio-logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
         {{- if .Values.worker.extraVolumes }}
 {{- include "alluxio.extraVolumes" (dict "extraVolumes" .Values.worker.extraVolumes) | indent 8 }}
         {{- end }}

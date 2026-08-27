@@ -35,12 +35,6 @@ import alluxio.master.file.mdsync.TaskStats;
 import alluxio.util.io.PathUtils;
 import alluxio.wire.FileInfo;
 
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.regions.Regions;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import org.gaul.s3proxy.S3Proxy;
 import org.gaul.s3proxy.junit.S3ProxyJunitCore;
 import org.gaul.s3proxy.junit.S3ProxyRule;
@@ -49,10 +43,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Iterable;
 
@@ -89,7 +88,6 @@ public class MetadataSyncV2TestBase extends FileSystemMasterTestBase {
       .build();
 
   boolean mUseRealS3 = false;
-  AmazonS3 mS3Client;
   S3Client mClient;
   DirectoryLoadType mDirectoryLoadType;
 
@@ -101,8 +99,6 @@ public class MetadataSyncV2TestBase extends FileSystemMasterTestBase {
     if (mUseRealS3) {
       Configuration.set(PropertyKey.UNDERFS_S3_REGION, "us-west-1");
       mClient = S3Client.builder().region(Region.US_WEST_1).build();
-      mS3Client = AmazonS3ClientBuilder.standard()
-          .withRegion(Region.US_WEST_1.toString()).build();
     } else {
       Configuration.set(PropertyKey.UNDERFS_S3_ENDPOINT,
           mS3Proxy.getUri().getHost() + ":" + mS3Proxy.getUri().getPort());
@@ -110,37 +106,50 @@ public class MetadataSyncV2TestBase extends FileSystemMasterTestBase {
       Configuration.set(PropertyKey.UNDERFS_S3_DISABLE_DNS_BUCKETS, true);
       Configuration.set(PropertyKey.S3A_ACCESS_KEY, mS3Proxy.getAccessKey());
       Configuration.set(PropertyKey.S3A_SECRET_KEY, mS3Proxy.getSecretKey());
-      mClient = S3Client.builder().credentialsProvider(StaticCredentialsProvider.create(
+      // SDK v2 + S3Proxy compat: see FileSystemMasterS3UfsTest for the reasoning.
+      mClient = S3Client.builder()
+          .credentialsProvider(StaticCredentialsProvider.create(
               AwsBasicCredentials.create(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
-          .endpointOverride(mS3Proxy.getUri()).region(Region.US_WEST_2)
-          .build();
-
-      mS3Client = AmazonS3ClientBuilder
-          .standard()
-          .withPathStyleAccessEnabled(true)
-          .withCredentials(
-              new AWSStaticCredentialsProvider(
-                  new BasicAWSCredentials(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
-          .withEndpointConfiguration(
-              new AwsClientBuilder.EndpointConfiguration(mS3Proxy.getUri().toString(),
-                  Regions.US_WEST_2.getName()))
+          .endpointOverride(mS3Proxy.getUri())
+          .region(Region.US_EAST_1)
+          .serviceConfiguration(S3Configuration.builder()
+              .pathStyleAccessEnabled(true)
+              .checksumValidationEnabled(false)
+              .build())
           .build();
     }
-    mS3Client.createBucket(TEST_BUCKET);
-    mS3Client.createBucket(TEST_BUCKET2);
+    createBucket(TEST_BUCKET);
+    createBucket(TEST_BUCKET2);
     super.before();
   }
 
   @Override
   public void after() throws Exception {
-    mS3Client.shutdown();
-    mClient.close();
+    if (mClient != null) {
+      mClient.close();
+    }
     try {
       stopS3Server();
     } catch (Exception e) {
       LOG.error("Closing s3 mock server failed", e);
     }
     super.after();
+  }
+
+  /** Test seed helper — bucket creation. */
+  void createBucket(String bucket) {
+    mClient.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+  }
+
+  /** Test seed helper — single-PUT with an in-memory string body. */
+  void putObject(String bucket, String key, String content) {
+    mClient.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
+        RequestBody.fromString(content));
+  }
+
+  /** Test seed helper — single-object delete. */
+  void deleteObject(String bucket, String key) {
+    mClient.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
   }
 
   ListStatusContext listSync(boolean isRecursive) {

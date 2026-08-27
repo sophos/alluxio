@@ -14,9 +14,9 @@ package alluxio.underfs.s3a;
 import alluxio.exception.runtime.AlluxioRuntimeException;
 import alluxio.grpc.ErrorType;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.services.s3.model.AmazonS3Exception;
 import io.grpc.Status;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.exception.SdkException;
 
 import java.net.HttpURLConnection;
 
@@ -27,32 +27,37 @@ public class AlluxioS3Exception extends AlluxioRuntimeException {
   private static final ErrorType ERROR_TYPE = ErrorType.External;
 
   /**
-   * Converts an AmazonClientException to a corresponding AlluxioS3Exception.
-   * @param cause aws s3 exception
+   * Converts an AWS SDK v2 {@link SdkException} to a corresponding AlluxioS3Exception.
+   * @param cause aws sdk v2 exception
    * @return alluxio s3 exception
    */
-  public static AlluxioS3Exception from(AmazonClientException cause) {
+  public static AlluxioS3Exception from(SdkException cause) {
     return from(null, cause);
   }
 
   /**
-   * Converts an AmazonClientException with errormessage to a corresponding AlluxioS3Exception.
+   * Converts an AWS SDK v2 {@link SdkException} with an error message to an AlluxioS3Exception.
+   * {@link AwsServiceException} subclasses (including
+   * {@code software.amazon.awssdk.services.s3.model.S3Exception}) carry HTTP status codes
+   * which are mapped to gRPC {@link Status} values via {@link #httpStatusToGrpcStatus(int)}.
    * @param errorMessage error message
-   * @param cause aws s3 exception
+   * @param cause aws sdk v2 exception
    * @return alluxio s3 exception
    */
-  public static AlluxioS3Exception from(String errorMessage, AmazonClientException cause) {
+  public static AlluxioS3Exception from(String errorMessage, SdkException cause) {
     Status status = Status.UNKNOWN;
     String errorDescription = "ClientException:" + cause.getMessage();
-    if (cause instanceof AmazonS3Exception) {
-      AmazonS3Exception exception = (AmazonS3Exception) cause;
-      status = httpStatusToGrpcStatus(exception.getStatusCode());
-      errorDescription = exception.getErrorCode() + ":" + exception.getErrorMessage();
+    if (cause instanceof AwsServiceException) {
+      AwsServiceException ase = (AwsServiceException) cause;
+      status = httpStatusToGrpcStatus(ase.statusCode());
+      String errorCode = ase.awsErrorDetails() == null
+          ? "AwsServiceException" : ase.awsErrorDetails().errorCode();
+      errorDescription = errorCode + ":" + ase.getMessage();
     }
     if (errorMessage == null) {
       errorMessage = errorDescription;
     }
-    return new AlluxioS3Exception(status, errorMessage, cause, cause.isRetryable());
+    return new AlluxioS3Exception(status, errorMessage, cause, cause.retryable());
   }
 
   private AlluxioS3Exception(Status status, String message, Throwable cause, boolean isRetryAble) {

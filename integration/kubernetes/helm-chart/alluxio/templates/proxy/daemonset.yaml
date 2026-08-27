@@ -24,6 +24,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-proxy
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
@@ -40,6 +43,9 @@ spec:
         release: {{ .Release.Name }}
         heritage: {{ .Release.Service }}
         role: alluxio-proxy
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       hostNetwork: {{ $hostNetwork }}
       dnsPolicy: {{ .Values.proxy.dnsPolicy | default ($hostNetwork | ternary "ClusterFirstWithHostNet" "ClusterFirst") }}

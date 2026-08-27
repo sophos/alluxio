@@ -34,6 +34,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-master
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
@@ -52,6 +55,9 @@ spec:
         release: {{ .Release.Name }}
         heritage: {{ .Release.Service }}
         role: alluxio-master
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     {{- if or .Values.master.podAnnotations .Values.metrics.enabled }}
       annotations:
       {{- with .Values.master.podAnnotations }}
@@ -80,6 +86,10 @@ spec:
       {{- if .Values.tolerations }}
 {{ toYaml .Values.tolerations | trim | indent 8  }}
       {{- end }}
+      {{- with .Values.master.topologySpreadConstraints }}
+      topologySpreadConstraints:
+{{ toYaml . | trim | indent 8 }}
+      {{- end }}
       securityContext:
         runAsUser: {{ .Values.user }}
         runAsGroup: {{ .Values.group }}
@@ -105,6 +115,25 @@ spec:
           - name: alluxio-journal
             mountPath: {{ .Values.journal.folder }}
       {{- end}}
+      # Sophos fork (CSA-21750): seed baked /opt/alluxio/conf contents into a
+      # writable emptyDir so the main container -- which runs with
+      # readOnlyRootFilesystem: true (KSV-0014) -- can still write
+      # conf/log4j.properties and conf/alluxio-site.properties in entrypoint.sh.
+      - name: seed-alluxio-conf
+        image: {{ .Values.image }}:{{ .Values.imageTag }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        # `cp -R` (NOT `cp -a`) on purpose: the pod runs as runAsUser:1000 /
+        # fsGroup:0, so the emptyDir mount is root:0 with g+rwx. `cp -a` copies
+        # files fine but then calls utimes() on the destination dir itself
+        # ("Operation not permitted" -- only the owner can set timestamps on a
+        # directory, and uid 1000 != root), which crashes the initContainer.
+        # `cp -R` preserves file modes naturally on regular files and never
+        # touches the destination dir's timestamps. Alluxio's conf/ has no
+        # scripts that rely on atime/mtime, so the lossy copy is harmless.
+        command: ["sh", "-c", "cp -R /opt/alluxio/conf/. /mnt/alluxio-conf/"]
+        volumeMounts:
+          - name: alluxio-conf
+            mountPath: /mnt/alluxio-conf
       shareProcessNamespace: {{ .Values.master.shareProcessNamespace | default false }}
       containers:
         {{- if .Values.master.extraContainers }}
@@ -113,6 +142,8 @@ spec:
         - name: alluxio-master
           image: {{ .Values.image }}:{{ .Values.imageTag }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
           {{- if .Values.master.resources  }}
 {{ include "alluxio.master.resources" . | indent 10 }}
           {{- end }}
@@ -176,6 +207,29 @@ spec:
             name: embedded
           {{- end }}
           volumeMounts:
+            # Sophos fork (CSA-21750): writable overlays required by
+            # readOnlyRootFilesystem: true above. conf/ is seeded from the image
+            # by the seed-alluxio-conf initContainer.
+            - name: alluxio-conf
+              mountPath: /opt/alluxio/conf
+            - name: alluxio-logs
+              mountPath: /opt/alluxio/logs
+            - name: tmp
+              mountPath: /tmp
+            # RocksDB off-heap metastore. Default
+            # alluxio.master.metastore.dir=${alluxio.work.dir}/metastore which
+            # resolves to /opt/alluxio-<ver>/metastore -- lives on the root FS
+            # and needs write access to mkdir blocks/ and inodes/ subdirs at
+            # boot. Safe as emptyDir: RocksDB state is rebuilt from the Raft
+            # journal on startup, so losing the metastore across restarts is
+            # correct behavior (journal is the source of truth). Only the
+            # alluxio-master container uses RocksDB -- job-master does not, so
+            # this overlay intentionally lives here only. Named *-overlay to
+            # avoid clashing with the opt-in `.Values.metastore` block below
+            # (which uses the bare `alluxio-metastore` name for user-configured
+            # PVC- or emptyDir-backed metastore at a custom mountPath).
+            - name: alluxio-metastore-overlay
+              mountPath: /opt/alluxio/metastore
             {{- if .Values.master.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.master.extraVolumeMounts) | indent 12 }}
             {{- end }}
@@ -207,6 +261,8 @@ spec:
         - name: alluxio-job-master
           image: {{ .Values.image }}:{{ .Values.imageTag }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
           {{- if .Values.jobMaster.resources  }}
 {{ include "alluxio.jobMaster.resources" . | indent 10 }}
           {{- end }}
@@ -270,6 +326,28 @@ spec:
             name: job-embedded
           {{- end }}
           volumeMounts:
+            # Sophos fork (CSA-21750): writable overlays for readOnlyRootFilesystem.
+            - name: alluxio-conf
+              mountPath: /opt/alluxio/conf
+            - name: alluxio-logs
+              mountPath: /opt/alluxio/logs
+            - name: tmp
+              mountPath: /tmp
+            # Job-master's raft journal. Upstream intentionally does NOT mount
+            # the alluxio-journal PVC here -- that PVC is exclusive to the
+            # alluxio-master container's FS raft journal (/journal/raft/). The
+            # job-master runs its own independent raft cluster whose journal
+            # lives at the default alluxio.job.master.journal.folder=/journal
+            # (resolved from alluxio.work.dir), which upstream expects to be a
+            # plain writable dir on the container's rootfs (ephemeral,
+            # rebuilt on every pod restart -- job state tracks in-flight jobs
+            # only, which are re-queued by clients after a restart). With
+            # readOnlyRootFilesystem: true, RaftJournalSystem.format() hits
+            # AccessDeniedException on mkdir /journal/JobJournal, so we need a
+            # dedicated writable overlay here. Distinct name from
+            # alluxio-journal to avoid any confusion with the master PVC.
+            - name: alluxio-job-journal-overlay
+              mountPath: /journal
           {{- if .Values.master.extraVolumeMounts }}
 {{- include "alluxio.extraVolumeMounts" (dict "extraVolumeMounts" .Values.master.extraVolumeMounts) | indent 12 }}
           {{- end }}
@@ -292,6 +370,30 @@ spec:
           {{- end }}
       restartPolicy: Always
       volumes:
+        # Sophos fork (CSA-21750): emptyDir volumes backing the writable
+        # overlays required by readOnlyRootFilesystem on the master and
+        # job-master containers. alluxio-conf is seeded from the baked image
+        # /opt/alluxio/conf by the seed-alluxio-conf initContainer.
+        - name: alluxio-conf
+          emptyDir: {}
+        - name: alluxio-logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        # Writable overlay for the master's default RocksDB metastore path.
+        # See the matching volumeMount on the alluxio-master container for why
+        # this is safe as emptyDir (journal is source of truth, metastore is
+        # rebuilt from it on restart).
+        - name: alluxio-metastore-overlay
+          emptyDir: {}
+        # Writable overlay for the job-master's default /journal path. See the
+        # matching volumeMount on alluxio-job-master for why this is safe as
+        # emptyDir (job-master journal tracks in-flight jobs only, rebuilt on
+        # every pod restart -- upstream already treats it as ephemeral on the
+        # container rootfs, we just need an explicit writable backing under
+        # readOnlyRootFilesystem).
+        - name: alluxio-job-journal-overlay
+          emptyDir: {}
         {{- if .Values.master.extraVolumes }}
 {{- include "alluxio.extraVolumes" (dict "extraVolumes" .Values.master.extraVolumes) | indent 8 }}
         {{- end }}

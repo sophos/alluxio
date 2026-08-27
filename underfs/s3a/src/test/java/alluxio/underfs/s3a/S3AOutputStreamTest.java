@@ -18,10 +18,6 @@ import alluxio.conf.AlluxioConfiguration;
 import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
 
-import com.amazonaws.services.s3.model.PutObjectRequest;
-import com.amazonaws.services.s3.transfer.TransferManager;
-import com.amazonaws.services.s3.transfer.Upload;
-import com.amazonaws.services.s3.transfer.model.UploadResult;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -29,11 +25,19 @@ import org.mockito.Mockito;
 import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.transfer.s3.S3TransferManager;
+import software.amazon.awssdk.transfer.s3.model.CompletedFileUpload;
+import software.amazon.awssdk.transfer.s3.model.FileUpload;
+import software.amazon.awssdk.transfer.s3.model.UploadFileRequest;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.DigestOutputStream;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Unit tests for the {@link S3AOutputStream}.
@@ -55,16 +59,24 @@ public class S3AOutputStreamTest {
    */
   @Before
   public void before() throws Exception {
+    // Use a real (empty) temp file so the v2 SDK's UploadFileRequest.source(Path) accepts the
+    // path. The transfer manager itself is mocked, so the file content is never actually read.
+    Path realTmp = Files.createTempFile("s3aoutputstreamtest", ".bin");
+    realTmp.toFile().deleteOnExit();
     mFile = Mockito.mock(File.class);
+    Mockito.when(mFile.toPath()).thenReturn(realTmp);
+    Mockito.when(mFile.length()).thenReturn(0L);
+    Mockito.when(mFile.delete()).thenReturn(true);
+    Mockito.when(mFile.getPath()).thenReturn(realTmp.toString());
     mLocalOutputStream = Mockito.mock(BufferedOutputStream.class);
-    TransferManager manager = Mockito.mock(TransferManager.class);
-    Upload result = Mockito.mock(Upload.class);
-    UploadResult uploadResult = Mockito.mock(UploadResult.class);
-    Mockito.doReturn(uploadResult).when(result).waitForUploadResult();
+    S3TransferManager manager = Mockito.mock(S3TransferManager.class);
+    FileUpload upload = Mockito.mock(FileUpload.class);
     mContentHash = "someHash";
-    Mockito.doReturn(mContentHash).when(uploadResult).getETag();
-
-    Mockito.when(manager.upload(Mockito.any(PutObjectRequest.class))).thenReturn(result);
+    PutObjectResponse putResp = PutObjectResponse.builder().eTag(mContentHash).build();
+    CompletedFileUpload completed = CompletedFileUpload.builder().response(putResp).build();
+    Mockito.doReturn(CompletableFuture.completedFuture(completed))
+        .when(upload).completionFuture();
+    Mockito.when(manager.uploadFile(Mockito.any(UploadFileRequest.class))).thenReturn(upload);
     PowerMockito.whenNew(BufferedOutputStream.class)
         .withArguments(Mockito.any(DigestOutputStream.class)).thenReturn(mLocalOutputStream);
     PowerMockito.whenNew(File.class).withArguments(Mockito.anyString()).thenReturn(mFile);
@@ -72,7 +84,8 @@ public class S3AOutputStreamTest {
     PowerMockito.whenNew(FileOutputStream.class).withArguments(mFile).thenReturn(outputStream);
     mStream = new S3AOutputStream(BUCKET_NAME, KEY, manager,
         sConf.getList(PropertyKey.TMP_DIRS),
-        sConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED));
+        sConf.getBoolean(PropertyKey.UNDERFS_S3_SERVER_SIDE_ENCRYPTION_ENABLED),
+        null);
     assertFalse(mStream.getContentHash().isPresent());
   }
 

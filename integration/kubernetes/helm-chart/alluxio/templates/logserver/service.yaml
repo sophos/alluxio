@@ -24,6 +24,9 @@ metadata:
     release: {{ $release.Name }}
     heritage: {{ $release.Service }}
     role: alluxio-logserver
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   ports:
     - port: 45600

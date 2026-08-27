@@ -26,6 +26,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-csi-controller
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: 1
   selector:
@@ -42,6 +45,9 @@ spec:
         release: {{ .Release.Name }}
         heritage: {{ .Release.Service }}
         role: alluxio-csi-controller
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccount: csi-controller-sa
       hostNetwork: {{ .Values.csi.controllerPlugin.hostNetwork }}

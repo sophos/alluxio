@@ -16,7 +16,7 @@
   <parent>
       <artifactId>alluxio-table-server-underdb</artifactId>
       <groupId>org.alluxio</groupId>
-      <version>2.9.5</version>
+      <version>2.9.6</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -29,8 +29,8 @@
       <!-- The following paths need to be defined here as well as in the parent pom so that mvn can -->
       <!-- run properly from sub-project directories -->
       <build.path>${project.parent.parent.parent.parent.basedir}/build</build.path>
-      <glue.version>1.11.820</glue.version>
-      <aws.java.jdk.version>1.11.820</aws.java.jdk.version>
+      <glue.version>1.12.797</glue.version>
+      <aws.java.jdk.version>1.12.797</aws.java.jdk.version>
       <hive-metastore.version>2.3.7</hive-metastore.version>
   </properties>
 
@@ -89,7 +89,7 @@
     <profile>
       <id>java11</id>
       <activation>
-        <jdk>11</jdk>
+        <jdk>[11,)</jdk>
       </activation>
       <dependencies>
         <dependency>

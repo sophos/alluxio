@@ -41,6 +41,22 @@ type FlagsOpts struct {
 	LibJars    string
 }
 
+func splitCSVFlag(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		result = append(result, part)
+	}
+	return result
+}
+
 // flags used by single/release/fuse to generate tarball
 func addCommonFlags(cmd *flag.FlagSet, opts *FlagsOpts) {
 	cmd.BoolVar(&debugFlag, "debug", false, "whether to run this tool in debug mode to generate additional console output")
@@ -64,7 +80,7 @@ func handleUfsModulesAndLibJars() error {
 	if strings.ToLower(ufsModulesFlag) == "all" {
 		ufsModulesFlag = strings.Join(validModules(ufsModules), ",")
 	} else {
-		for _, module := range strings.Split(ufsModulesFlag, ",") {
+		for _, module := range splitCSVFlag(ufsModulesFlag) {
 			if _, ok := ufsModules[module]; !ok {
 				return fmt.Errorf("ufs module %v not recognized", module)
 			}
@@ -84,7 +100,7 @@ func handleUfsModulesAndLibJars() error {
 		}
 		includedLibJarsFlag = strings.Join(fuseJars, ",")
 	default:
-		for _, jar := range strings.Split(includedLibJarsFlag, ",") {
+		for _, jar := range splitCSVFlag(includedLibJarsFlag) {
 			if _, ok := libJars[jar]; !ok {
 				return fmt.Errorf("lib jar %v not recognized", jar)
 			}

@@ -12,12 +12,20 @@
 # This should not be modified in the usual case.
 fullnameOverride: alluxio
 
+# Caller-supplied opaque map of labels applied to every resource that
+# already emits metadata.labels AND to every pod template that already
+# emits labels. Empty/absent map = nothing added (chart behavior unchanged).
+# Selectors (matchLabels) and resources with no existing labels block are
+# NOT touched — see templates/_helpers.tpl `alluxio.commonLabels` for the
+# rationale.
+commonLabels: {}
+
 
 ## Common ##
 
 # Docker Image
 image: alluxio/alluxio
-imageTag: 2.9.5
+imageTag: 2.9.6
 imagePullPolicy: IfNotPresent
 
 # Security Context
@@ -106,6 +114,15 @@ master:
   extraVolumeMounts: []
   extraVolumes: []
   extraServicePorts: []
+  # Sophos fork (CSA-21950): raw v1.TopologySpreadConstraint list rendered
+  # into the master statefulset pod spec. Use with maxSkew + a labelSelector
+  # matching `app: <chart-name>, role: alluxio-master` (the labels the chart
+  # already attaches to master pods) to spread an HA Raft master quorum
+  # across distinct nodes for correlated-failure protection. Pair with
+  # whenUnsatisfiable: ScheduleAnyway for opportunistic / cost-free spread,
+  # or DoNotSchedule for guaranteed spread (autoscaler will provision an
+  # extra node to satisfy it).
+  topologySpreadConstraints: []
   # dnsPolicy will be ClusterFirstWithHostNet if hostNetwork: true
   # and ClusterFirst if hostNetwork: false
   # You can specify dnsPolicy here to override this inference
@@ -285,6 +302,13 @@ worker:
   hostNetwork: false
   shareProcessNamespace: false
   extraContainers: []
+  # Sophos fork (CSA-21950): full v1.Container specs rendered into the
+  # worker pod's initContainers list, AFTER the chart's own
+  # seed-alluxio-conf step. Useful for one-shot setup like chown'ing a
+  # hostPath tier directory so the non-root worker can write into it.
+  # `tpl` is applied to each entry so you can reference chart values
+  # (e.g. `{{ .Values.image }}:{{ .Values.imageTag }}`) inline.
+  extraInitContainers: []
   extraVolumeMounts: []
   extraVolumes: []
   # dnsPolicy will be ClusterFirstWithHostNet if hostNetwork: true

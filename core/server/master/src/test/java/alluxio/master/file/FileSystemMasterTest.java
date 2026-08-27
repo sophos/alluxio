@@ -22,6 +22,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
@@ -29,6 +32,7 @@ import alluxio.AlluxioURI;
 import alluxio.AuthenticatedClientUserResource;
 import alluxio.AuthenticatedUserRule;
 import alluxio.Constants;
+import alluxio.TestLoggerRule;
 import alluxio.client.WriteType;
 import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
@@ -71,6 +75,9 @@ import alluxio.master.file.contexts.SetAttributeContext;
 import alluxio.master.file.contexts.WorkerHeartbeatContext;
 import alluxio.master.file.meta.PersistenceState;
 import alluxio.master.journal.JournalContext;
+import alluxio.master.metastore.InodeStore;
+import alluxio.master.metastore.ReadOption;
+import alluxio.master.metastore.heap.HeapInodeStore;
 import alluxio.proto.journal.Journal;
 import alluxio.security.authorization.AclEntry;
 import alluxio.security.authorization.Mode;
@@ -89,6 +96,7 @@ import com.google.common.collect.Sets;
 import com.google.common.math.IntMath;
 import com.google.protobuf.ByteString;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -107,9 +115,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Unit tests for {@link FileSystemMaster}.
@@ -133,6 +143,9 @@ public final class FileSystemMasterTest extends FileSystemMasterTestBase {
 
   @Parameterized.Parameter
   public ImmutableMap<PropertyKey, Object> mConfigMap;
+
+  @Rule
+  public TestLoggerRule mLogRule = new TestLoggerRule();
 
   @Override
   public void before() throws Exception {
@@ -502,6 +515,196 @@ public final class FileSystemMasterTest extends FileSystemMasterTestBase {
           .convertAclToStringEntries());
       assertEquals(newEntries, entries);
     }
+  }
+
+  /**
+   * Recursive setAcl with a mixed list of access + default entries must succeed
+   * across a subtree that contains files. Upstream Alluxio threw
+   * UnsupportedOperationException ("Can not set default ACL for a file") on the
+   * first file it walked, because {@code setAclSingleInode} rejects any
+   * default entry on a file and the -R walk passed the full entries list to
+   * every descendant. We now partition per inode type inside
+   * {@code setAclRecursive}: dirs get access + default, files get access only.
+   * This matches POSIX semantics (default ACLs are dir-only) and linux setfacl
+   * -R behaviour, and is what makes recursive ACL backfill workable on
+   * cached-inode subtrees that mix dirs and files.
+   */
+  @Test
+  public void setAclRecursiveMixedAccessAndDefaultSkipsDefaultOnFiles() throws Exception {
+    createFileWithSingleBlock(NESTED_FILE_URI);
+    List<AclEntry> mixedEntries = Stream.of(
+        "user:trino-metabase:r-x",
+        "default:user::rwx",
+        "default:group::---",
+        "default:mask::rwx",
+        "default:other::---",
+        "default:user:trino-metabase:r-x")
+        .map(AclEntry::fromCliString)
+        .collect(Collectors.toList());
+
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY, mixedEntries,
+        SetAclContext.mergeFrom(SetAclPOptions.newBuilder().setRecursive(true)));
+
+    // Directory inherited both access and default entries.
+    FileInfo dirInfo = mFileSystemMaster.getFileInfo(NESTED_URI, GET_STATUS_CONTEXT);
+    assertTrue("dir access should carry named entry: " + dirInfo.getAcl().toStringEntries(),
+        dirInfo.getAcl().toStringEntries().contains("user:trino-metabase:r-x"));
+    assertTrue("dir default should carry named entry: " + dirInfo.getDefaultAcl().toStringEntries(),
+        dirInfo.getDefaultAcl().toStringEntries().contains("default:user:trino-metabase:r-x"));
+
+    // File got the access entry; default entries silently skipped, no throw.
+    FileInfo fileInfo = mFileSystemMaster.getFileInfo(NESTED_FILE_URI, GET_STATUS_CONTEXT);
+    assertTrue("file access should carry named entry: " + fileInfo.getAcl().toStringEntries(),
+        fileInfo.getAcl().toStringEntries().contains("user:trino-metabase:r-x"));
+    assertTrue("file default ACL must remain empty (POSIX: dir-only): "
+            + fileInfo.getDefaultAcl().toStringEntries(),
+        fileInfo.getDefaultAcl().isEmpty());
+  }
+
+  /**
+   * A descendant that concurrent activity deletes between the parent's child listing and the
+   * moment the walk reaches it must be skipped, not abort the whole recursive operation
+   * (CSA-22628).
+   *
+   * <p>{@code RecursiveInodeIterator} hands out children from the listing taken when it
+   * descended into the parent, and locks only the edge to each one, so
+   * {@code LockedInodePath#traverse} re-reads the child from the store and returns a short lock
+   * list once it is gone. Production hit this on a Hudi-ingest tree: a recursive ACL backfill
+   * died on one .parquet that compaction removed mid-walk, discarding the entire run.
+   *
+   * <p>The fixture reproduces that window with no threads and no timing. The store keeps
+   * listing the victim through {@code getChildren}, as the iterator's snapshot would, while
+   * point lookups through {@code getChild} deny it, as the real store does after a delete.
+   */
+  @Test
+  public void setAclRecursiveSkipsConcurrentlyDeletedDescendant() throws Exception {
+    InodeStore spiedStore = restartWithSpiedInodeStore();
+    // HeapInodeStore orders children by name, so these names pin the vanish to the middle of
+    // the walk. That is what makes this prove the walk carried on past the victim, rather than
+    // merely tolerating a vanish on the very last descendant.
+    AlluxioURI first = NESTED_URI.join("a_survivor");
+    AlluxioURI last = NESTED_URI.join("z_survivor");
+    createFileWithSingleBlock(first);
+    createFileWithSingleBlock(NESTED_URI.join("m_victim"));
+    createFileWithSingleBlock(last);
+    hideFromPointLookups(spiedStore, "m_victim");
+
+    // Before CSA-22628 this threw FileDoesNotExistException and abandoned the rest of the tree.
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY,
+        Collections.singletonList(AclEntry.fromCliString("user:trino-metabase:r-x")),
+        SetAclContext.mergeFrom(SetAclPOptions.newBuilder().setRecursive(true)));
+
+    for (AlluxioURI survivor : new AlluxioURI[] {first, last}) {
+      List<String> acl = mFileSystemMaster.getFileInfo(survivor, GET_STATUS_CONTEXT)
+          .getAcl().toStringEntries();
+      assertTrue("surviving descendant " + survivor + " should have the ACL applied: " + acl,
+          acl.contains("user:trino-metabase:r-x"));
+    }
+  }
+
+  /**
+   * The walk must report how many descendants it skipped. Without a count an operator cannot
+   * tell a handful of transient vanishes from a run that silently missed most of the subtree,
+   * and that distinction is the whole signal for whether the race worsens as ingest grows.
+   */
+  @Test
+  public void setAclRecursiveReportsSkippedDescendantCount() throws Exception {
+    InodeStore spiedStore = restartWithSpiedInodeStore();
+    createFileWithSingleBlock(NESTED_URI.join("a_survivor"));
+    createFileWithSingleBlock(NESTED_URI.join("m_victim"));
+    createFileWithSingleBlock(NESTED_URI.join("z_survivor"));
+    hideFromPointLookups(spiedStore, "m_victim");
+
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY,
+        Collections.singletonList(AclEntry.fromCliString("user:trino-metabase:r-x")),
+        SetAclContext.mergeFrom(SetAclPOptions.newBuilder().setRecursive(true)));
+
+    assertTrue("the walk should report how many descendants it skipped",
+        mLogRule.wasLogged("skipped 1 of 3 descendants"));
+  }
+
+  /**
+   * Restarts the master over a spied inode store and returns the spy, so a test can make one
+   * child invisible to point lookups while its parent still lists it.
+   *
+   * @return the spied inode store backing the restarted master
+   */
+  private InodeStore restartWithSpiedInodeStore() throws Exception {
+    InodeStore[] captured = new InodeStore[1];
+    mInodeStoreFactory = lockManager -> {
+      captured[0] = spy(new HeapInodeStore());
+      return captured[0];
+    };
+    stopServices();
+    startServices();
+    return captured[0];
+  }
+
+  /**
+   * Makes a single child name resolve to nothing on point lookups, while leaving it in its
+   * parent's child listing -- the exact asymmetry a concurrent delete creates between the
+   * iterator's snapshot and the live store.
+   *
+   * @param store the spied inode store
+   * @param childName the child name to hide
+   */
+  private static void hideFromPointLookups(InodeStore store, String childName) {
+    doReturn(Optional.empty()).when(store)
+        .getChild(any(Long.class), eq(childName), any(ReadOption.class));
+  }
+
+  /**
+   * Regression: a setfacl that supplies a named-user access entry plus an
+   * explicit default mask (but NO explicit access mask) must still auto-
+   * recompute the access mask from the new named entry. Upstream Alluxio's
+   * {@code MutableInode.updateMask(entries)} early-returned on ANY mask entry,
+   * treating "caller supplied mask" as a global suppression — which meant
+   * mixing {@code user:name:r-x} with {@code default:mask::rwx} left the
+   * fresh-inode access mask at --- (ExtendedACLEntries default), AND'ing the
+   * named entry down to zero. On the Sophos fork this is exactly what the
+   * alluxio-config ACL backfill generates (access-side named grant +
+   * `default:*` block including `default:mask::rwx`), so new UFS-synced
+   * partitions were silently unreadable to the very tenant they were meant
+   * to be granted to. The patch in MutableInode tracks access/default mask
+   * presence independently and lets each side auto-recompute unless that
+   * specific side was supplied — matching linux setfacl semantics.
+   */
+  @Test
+  public void setAclMixedNamedUserAndDefaultMaskAutoComputesAccessMask() throws Exception {
+    mFileSystemMaster.createDirectory(NESTED_URI, CreateDirectoryContext
+        .mergeFrom(CreateDirectoryPOptions.newBuilder().setRecursive(true)));
+
+    List<AclEntry> mixedEntries = Stream.of(
+        "user:trino-metabase:r-x",
+        "default:user::rwx",
+        "default:group::---",
+        "default:mask::rwx",
+        "default:other::---",
+        "default:user:trino-metabase:r-x")
+        .map(AclEntry::fromCliString)
+        .collect(Collectors.toList());
+
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY, mixedEntries,
+        SetAclContext.defaults());
+
+    List<String> accessEntries = mFileSystemMaster
+        .getFileInfo(NESTED_URI, GET_STATUS_CONTEXT).getAcl().toStringEntries();
+    // Named user r-x ∪ owning group --- = r-x — the mask must be r-x, NOT ---
+    // (the ExtendedACLEntries default). With the old early-return bug this
+    // assertion would fail: the mask would be mask::--- and the named entry
+    // would be effectively ---, denying the tenant.
+    assertTrue("access mask must be auto-recomputed to r-x, got: " + accessEntries,
+        accessEntries.contains("mask::r-x"));
+    assertTrue("named user entry must still be present: " + accessEntries,
+        accessEntries.contains("user:trino-metabase:r-x"));
+
+    // The explicitly-supplied default mask must be preserved verbatim — the
+    // per-side gate must NOT recompute the default mask, because the caller
+    // said "I want default:mask::rwx" and we honour it.
+    List<String> defaultEntries = mFileSystemMaster
+        .getFileInfo(NESTED_URI, GET_STATUS_CONTEXT).getDefaultAcl().toStringEntries();
+    assertTrue("default mask must be preserved as supplied: " + defaultEntries,
+        defaultEntries.contains("default:mask::rwx"));
   }
 
   @Test

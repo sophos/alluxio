@@ -26,18 +26,20 @@ import alluxio.exception.InvalidPathException;
 import alluxio.master.file.contexts.ExistsContext;
 import alluxio.master.file.contexts.MountContext;
 
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.regions.Regions;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import org.gaul.s3proxy.junit.S3ProxyRule;
 import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.IOException;
 
@@ -52,7 +54,7 @@ public final class FileSystemMasterS3UfsTest extends FileSystemMasterTestBase {
   private static final String TEST_CONTENT = "test_content";
   private static final AlluxioURI UFS_ROOT = new AlluxioURI("s3://test-bucket/");
   private static final AlluxioURI MOUNT_POINT = new AlluxioURI("/s3_mount");
-  private AmazonS3 mS3Client;
+  private S3Client mS3Client;
   @Rule
   public S3ProxyRule mS3Proxy = S3ProxyRule.builder()
       .withPort(8001)
@@ -67,17 +69,21 @@ public final class FileSystemMasterS3UfsTest extends FileSystemMasterTestBase {
     Configuration.set(PropertyKey.S3A_ACCESS_KEY, mS3Proxy.getAccessKey());
     Configuration.set(PropertyKey.S3A_SECRET_KEY, mS3Proxy.getSecretKey());
 
-    mS3Client = AmazonS3ClientBuilder
-        .standard()
-        .withPathStyleAccessEnabled(true)
-        .withCredentials(
-            new AWSStaticCredentialsProvider(
-                new BasicAWSCredentials(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
-        .withEndpointConfiguration(
-            new AwsClientBuilder.EndpointConfiguration(mS3Proxy.getUri().toString(),
-                Regions.US_WEST_2.getName()))
+    // SDK v2 + S3Proxy compatibility: force path-style addressing, disable the SDK's default
+    // checksum-mode header (S3Proxy returns 501), and pin the client to us-east-1 so v2 doesn't
+    // emit a LocationConstraint header on CreateBucket (S3Proxy returns 400 on that). The
+    // alluxio s3a UFS still talks to S3Proxy as us-west-2; this is just the local test seed.
+    mS3Client = S3Client.builder()
+        .endpointOverride(mS3Proxy.getUri())
+        .region(Region.US_EAST_1)
+        .credentialsProvider(StaticCredentialsProvider.create(
+            AwsBasicCredentials.create(mS3Proxy.getAccessKey(), mS3Proxy.getSecretKey())))
+        .serviceConfiguration(S3Configuration.builder()
+            .pathStyleAccessEnabled(true)
+            .checksumValidationEnabled(false)
+            .build())
         .build();
-    mS3Client.createBucket(TEST_BUCKET);
+    mS3Client.createBucket(CreateBucketRequest.builder().bucket(TEST_BUCKET).build());
 
     super.before();
   }
@@ -99,13 +105,18 @@ public final class FileSystemMasterS3UfsTest extends FileSystemMasterTestBase {
       throws FileDoesNotExistException, FileAlreadyExistsException, AccessControlException,
       IOException, InvalidPathException {
     mFileSystemMaster.mount(MOUNT_POINT, UFS_ROOT, MountContext.defaults());
-    mS3Client.putObject(TEST_BUCKET, TEST_FILE, TEST_CONTENT);
+    mS3Client.putObject(
+        PutObjectRequest.builder().bucket(TEST_BUCKET).key(TEST_FILE).build(),
+        RequestBody.fromString(TEST_CONTENT));
     assertTrue(mFileSystemMaster.exists(MOUNT_POINT.join(TEST_FILE), ExistsContext.defaults()));
   }
 
   @Override
   public void after() throws Exception {
-    mS3Client = null;
+    if (mS3Client != null) {
+      mS3Client.close();
+      mS3Client = null;
+    }
     super.after();
   }
 }

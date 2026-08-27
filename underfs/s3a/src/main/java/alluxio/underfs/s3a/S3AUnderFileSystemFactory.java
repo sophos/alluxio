@@ -17,9 +17,9 @@ import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.UnderFileSystemFactory;
 
-import com.amazonaws.AmazonClientException;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
+import software.amazon.awssdk.core.exception.SdkException;
 
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -42,7 +42,7 @@ public class S3AUnderFileSystemFactory implements UnderFileSystemFactory {
 
     try {
       return S3AUnderFileSystem.createInstance(new AlluxioURI(path), conf);
-    } catch (AmazonClientException e) {
+    } catch (SdkException e) {
       throw Throwables.propagate(e);
     }
   }

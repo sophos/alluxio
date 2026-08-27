@@ -36,7 +36,7 @@ func Single(args []string) error {
 	addCommonFlags(singleCmd, &FlagsOpts{
 		TargetName: fmt.Sprintf("alluxio-%v-bin.tar.gz", versionMarker),
 		UfsModules: strings.Join(defaultModules(ufsModules), ","),
-		LibJars:    libJarsAll,
+		LibJars:    strings.Join(defaultLibJarNames(), ","),
 	})
 	singleCmd.StringVar(&customUfsModuleFlag, "custom-ufs-module", "",
 		"a percent-separated list of custom ufs modules which has the form of a pipe-separated triplet of module name, ufs type, and its comma-separated maven arguments."+
@@ -142,7 +142,7 @@ func getVersion() (string, error) {
 }
 
 func addModules(srcPath, dstPath, name, moduleFlag, version string, modules map[string]module) {
-	for _, moduleName := range strings.Split(moduleFlag, ",") {
+	for _, moduleName := range splitCSVFlag(moduleFlag) {
 		moduleEntry, ok := modules[moduleName]
 		if !ok {
 			// This should be impossible, we validate modulesFlag at the start.
@@ -156,7 +156,7 @@ func addModules(srcPath, dstPath, name, moduleFlag, version string, modules map[
 
 func buildModules(srcPath, name, moduleFlag, version string, modules map[string]module, mvnArgs []string) {
 	// Compile modules for the main build
-	for _, moduleName := range strings.Split(moduleFlag, ",") {
+	for _, moduleName := range splitCSVFlag(moduleFlag) {
 		moduleEntry := modules[moduleName]
 		moduleMvnArgs := mvnArgs
 		for _, arg := range strings.Split(moduleEntry.mavenArgs, " ") {
@@ -202,8 +202,22 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 			"bin/alluxio-stop.sh",
 			"bin/alluxio-workers.sh",
 			"bin/launch-process",
-			fmt.Sprintf("client/build/alluxio-%v-hadoop2-client.jar", version),
-			fmt.Sprintf("client/build/alluxio-%v-hadoop3-client.jar", version),
+			// Sophos fork: client/build/alluxio-<ver>-hadoop{2,3}-client.jar
+			// are the maven-shade-plugin uber-jars built by shaded/client/
+			// and shaded/client-hadoop3/.  They are produced for external
+			// consumers (Spark / Presto / Hive / EMR / Dataproc) that
+			// extract this tarball on a host and run the Alluxio CLI client
+			// out of /opt/alluxio/client/.  In the Sophos Central K8s
+			// deployment these jars are dead weight: nothing in
+			// libexec/alluxio-config.sh's ALLUXIO_{SERVER,CLIENT}_CLASSPATH
+			// references them, and the downstream Trino image
+			// (cld.data-containers.trino-images) consumes the separate
+			// alluxio-<ver>-client-libs.tar.gz sidecar instead, explicitly
+			// to avoid the shaded-classpath conflicts that these uber-jars
+			// would introduce.  Dropping them saves ~80 MB and clears
+			// every "duplicate hadoop transitive" reading the Prisma SBOM
+			// flagged on the previous build (protobuf-java 3.19.6 +
+			// zookeeper 3.8.4 hits inside the hadoop3-client jar).
 			"conf/rocks-inode-bloom.ini.template",
 			"conf/rocks-block-bloom.ini.template",
 			"conf/rocks-inode.ini.template",
@@ -222,7 +236,10 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 			"integration/docker/Dockerfile",
 			"integration/docker/Dockerfile-dev",
 			"integration/docker/entrypoint.sh",
-			"integration/fuse/bin/alluxio-fuse",
+			// Sophos fork: integration/fuse/bin/alluxio-fuse is the launcher
+			// shell wrapper for the FUSE uber-jar; both are intentionally
+			// stripped from the runtime tarball (see the FUSE block above
+			// near `toCreateDirs` for the full rationale).
 			"integration/metrics/docker-compose-master.yaml",
 			"integration/metrics/docker-compose-worker.yaml",
 			"integration/metrics/otel-agent-config.yaml",
@@ -234,7 +251,7 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 		)
 	}
 
-	for _, jar := range strings.Split(includedLibJarsFlag, ",") {
+	for _, jar := range splitCSVFlag(includedLibJarsFlag) {
 		pathsToCopy = append(pathsToCopy, fmt.Sprintf("lib/alluxio-%v-%v.jar", jar, version))
 	}
 
@@ -243,12 +260,10 @@ func addAdditionalFiles(srcPath, dstPath string, hadoopVersion version, version 
 		run(fmt.Sprintf("adding %v", path), "cp", path, filepath.Join(dstPath, path))
 	}
 
-	if !fuse {
-		run("create symlink for client jar", "ln", "-s",
-			fmt.Sprintf("build/alluxio-%v-hadoop2-client.jar", version),
-			filepath.Join(dstPath, fmt.Sprintf("client/alluxio-%v-client.jar", version)),
-		)
-	}
+	// Sophos fork: skip the `client/alluxio-<ver>-client.jar` symlink that
+	// upstream creates as a default-name pointer to the hadoop2 fat-client
+	// jar.  We don't ship the hadoop2/hadoop3 fat-clients (see pathsToCopy
+	// above for the rationale), so the symlink target wouldn't exist.
 
 	modulesToAdd := map[string]module{}
 	if fuse {
@@ -295,7 +310,11 @@ func generateTarball(opts *GenerateTarballOpts) error {
 	run(fmt.Sprintf("copying source from %v to %v", repoPath, srcPath), "cp", "-R", repoPath+"/.", srcPath)
 
 	chdir(srcPath)
-	run("running git clean -fdx", "git", "clean", "-fdx")
+	if _, err := os.Stat(filepath.Join(srcPath, ".git")); err == nil {
+		run("running git clean -fdx", "git", "clean", "-fdx")
+	} else {
+		fmt.Println("  skipping git clean (not a git repository)")
+	}
 
 	version, err := getVersion()
 	if err != nil {
@@ -338,7 +357,26 @@ func generateTarball(opts *GenerateTarballOpts) error {
 
 	toCreateDirs := []string{"logs", "lib", "bin"}
 	if !opts.Fuse {
-		toCreateDirs = append(toCreateDirs, "assembly", "client", "integration/fuse", "integration/kubernetes", "logs/user")
+		// Sophos fork: two upstream-default top-level dirs are intentionally
+		// not created in the server tarball:
+		//   * `integration/fuse/` -- helm/values.yaml sets fuse.enabled=false
+		//     (and the CSI driver is also disabled), so the FUSE uber-jar
+		//     and its launcher script are not packaged below.  That alone
+		//     dropped ~half of the image's reported high-severity CVE
+		//     surface (Apache Ratis 2.4.1's shaded netty 4.1.77, jetty/
+		//     zookeeper transitives bundled by maven-shade-plugin into
+		//     alluxio-fuse-<ver>.jar).
+		//   * `client/` -- the maven-shade-plugin fat-client jars built by
+		//     shaded/client/ and shaded/client-hadoop3/ are not packaged
+		//     either.  They exist for external Alluxio CLI / Spark / Presto
+		//     consumers that extract the tarball; the Sophos K8s deployment
+		//     never loads them (the alluxio master/worker JVMs use
+		//     assembly/alluxio-{server,client}-<ver>.jar instead, and the
+		//     downstream Trino image pulls a separate
+		//     alluxio-<ver>-client-libs.tar.gz sidecar to avoid shaded-
+		//     classpath conflicts).  See the pathsToCopy block in
+		//     addAdditionalFiles for the per-jar rationale.
+		toCreateDirs = append(toCreateDirs, "assembly", "integration/kubernetes", "logs/user")
 	}
 	for _, dir := range toCreateDirs {
 		mkdir(filepath.Join(dstPath, dir))
@@ -357,7 +395,11 @@ func generateTarball(opts *GenerateTarballOpts) error {
 		}
 		run("adding Alluxio client assembly jar", "mv", fmt.Sprintf("assembly/client/target/alluxio-assembly-client-%v-jar-with-dependencies.jar", version), filepath.Join(dstPath, "assembly", fmt.Sprintf("alluxio-client-%v.jar", version)))
 		run("adding Alluxio server assembly jar", "mv", fmt.Sprintf("assembly/server/target/alluxio-assembly-server-%v-jar-with-dependencies.jar", version), filepath.Join(dstPath, "assembly", fmt.Sprintf("alluxio-server-%v.jar", version)))
-		run("adding Alluxio FUSE jar", "mv", fmt.Sprintf("integration/fuse/target/alluxio-integration-fuse-%v-jar-with-dependencies.jar", version), filepath.Join(dstPath, "integration", "fuse", fmt.Sprintf("alluxio-fuse-%v.jar", version)))
+		// Sophos fork: FUSE is disabled in the helm chart so the fuse uber-jar
+		// is intentionally not packaged.  See toCreateDirs above for the full
+		// rationale.  The Maven reactor still builds integration/fuse/target/
+		// (some other modules pull it transitively for tests); we just don't
+		// move the resulting jar into the shipped tarball.
 		// Generate Helm templates in the dstPath
 		run("adding Helm chart", "cp", "-r", filepath.Join(srcPath, "integration/kubernetes/helm-chart"), filepath.Join(dstPath, "integration/kubernetes/helm-chart"))
 		if !opts.SkipHelm {

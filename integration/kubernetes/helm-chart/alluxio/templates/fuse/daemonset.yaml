@@ -23,6 +23,9 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
     role: alluxio-fuse
+    {{- with include "alluxio.commonLabels" . }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
@@ -39,6 +42,9 @@ spec:
         release: {{ .Release.Name }}
         heritage: {{ .Release.Service }}
         role: alluxio-fuse
+        {{- with include "alluxio.commonLabels" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
     spec:
       hostNetwork: {{ .Values.fuse.hostNetwork }}
       hostPID: {{ .Values.fuse.hostPID }}

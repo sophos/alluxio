@@ -15,7 +15,7 @@
   <parent>
     <groupId>org.alluxio</groupId>
     <artifactId>alluxio-underfs</artifactId>
-    <version>2.9.5</version>
+    <version>2.9.6</version>
   </parent>
   <artifactId>alluxio-underfs-s3a</artifactId>
   <name>Alluxio Under File System - S3</name>
@@ -32,7 +32,7 @@
     <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-collections4</artifactId>
-      <version>4.0</version>
+      <version>4.4</version>
     </dependency>
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
@@ -40,19 +40,19 @@
     </dependency>
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3-transfer-manager</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>sts</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
       <artifactId>netty-nio-client</artifactId>
     </dependency>
     <dependency>
-      <groupId>com.amazonaws</groupId>
-      <artifactId>aws-java-sdk-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.amazonaws</groupId>
-      <artifactId>aws-java-sdk-s3</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.amazonaws</groupId>
-      <artifactId>aws-java-sdk-sts</artifactId>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>apache-client</artifactId>
     </dependency>
     <!--aws sdk requires jaxb binding at runtime-->
     <dependency>
@@ -92,6 +92,42 @@
       <plugin>
         <groupId>com.coderplus.maven.plugins</groupId>
         <artifactId>copy-rename-maven-plugin</artifactId>
+      </plugin>
+      <!--
+        Regression guard for CSA-21975: this module is fully on AWS SDK v2 and must stay that
+        way. Any reintroduction of a direct com.amazonaws:* dependency fails the build.
+        searchTransitive=false because alluxio-core-common (provided scope) still drags a
+        transitive aws-java-sdk-core in for the EC2MetadataUtils / UpdateCheck callsites in
+        core/common/ and core/server/proxy/; those are tracked in a follow-up branch and
+        the root pom still publishes v1 dep entries for them.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>ban-aws-sdk-v1</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <searchTransitive>false</searchTransitive>
+                  <excludes>
+                    <exclude>com.amazonaws:*</exclude>
+                  </excludes>
+                  <message>
+                    The underfs/s3a module is on AWS SDK v2 only (CSA-21975).
+                    Add equivalent software.amazon.awssdk:* deps instead of com.amazonaws:*.
+                  </message>
+                </bannedDependencies>
+              </rules>
+              <fail>true</fail>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>
