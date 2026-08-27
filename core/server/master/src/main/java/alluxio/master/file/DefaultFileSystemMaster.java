@@ -4085,6 +4085,8 @@ public class DefaultFileSystemMaster extends CoreMaster
       try (SkippableInodeIterator descendants = mInodeStore.getSkippableChildrenIterator(
           ReadOption.defaults(), DescendantType.ALL, false, inodePath)) {
         int journalFlushCounter = 0;
+        long visitedCount = 0;
+        long skippedVanishedCount = 0;
         while (descendants.hasNext()) {
           rpcContext.throwIfCancelled();
           InodeIterationResult descendant = descendants.next();
@@ -4092,6 +4094,22 @@ public class DefaultFileSystemMaster extends CoreMaster
           // The iterator locks each child without traversing to it; traverse() completes the
           // lock list. Same idiom as DefaultSyncProcess, the other consumer of this iterator.
           childPath.traverse();
+          visitedCount++;
+          // CSA-22628: the iterator yields children from the listing taken when we descended
+          // into the parent and locks only the edge to each one (RecursiveInodeIterator#next
+          // passes shouldTraverse=false). traverse() re-reads the child from the store and
+          // returns early -- without throwing -- when it is already gone, so a short lock list
+          // here means the path was deleted between that listing and now. Skip it: no inode is
+          // left to hold an ACL, and a replacement created later inherits the parent's default
+          // ACL on metadata load, per security.authorization.sync.inherit-parent-acl. Only
+          // descendants are forgiven; the recursion root is applied before this loop, so a
+          // mistyped target still fails loudly.
+          if (!childPath.fullPathExists()) {
+            skippedVanishedCount++;
+            SAMPLING_LOG.warn("Recursive setAcl on {} is skipping descendant {}: it was deleted "
+                + "concurrently during the walk.", inodePath.getUri(), childPath.getUri());
+            continue;
+          }
           // Fused permission check -- see the note in setAcl.
           mPermissionChecker.checkSetAttributePermission(childPath, false, true, false);
           List<AclEntry> effectiveEntries = entries;
@@ -4113,9 +4131,16 @@ public class DefaultFileSystemMaster extends CoreMaster
         // Commit the tail of the walk, so the operation has an explicit durability boundary
         // instead of relying on the enclosing journal context's close.
         commitJournals(rpcContext);
+        if (skippedVanishedCount > 0) {
+          LOG.warn("Recursive setAcl on {} skipped {} of {} descendants that were deleted "
+              + "concurrently during the walk. Replacements, if any, inherit the parent default "
+              + "ACL on metadata load.", inodePath.getUri(), skippedVanishedCount, visitedCount);
+        }
       } catch (InvalidPathException e) {
-        // traverse() only fails if the tree changed under the iterator, which the write locks
-        // above are meant to prevent. Surface it rather than silently applying a partial ACL.
+        // traverse() throws only for a structurally invalid path -- a component that is a file
+        // where a directory is required. A component that has merely been deleted makes it
+        // return early instead, which the fullPathExists() guard above handles. Surface this
+        // one rather than silently applying a partial ACL.
         throw new IOException(e);
       }
     }
