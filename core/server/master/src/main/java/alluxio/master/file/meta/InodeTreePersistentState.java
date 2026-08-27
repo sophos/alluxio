@@ -303,7 +303,7 @@ public class InodeTreePersistentState implements Journaled {
    */
   public void applyAndJournal(Supplier<JournalContext> context, SetAclEntry entry) {
     try {
-      applySetAcl(entry);
+      applySetAcl(entry, false);
       context.get().append(JournalEntry.newBuilder().setSetAcl(entry).build());
     } catch (Throwable t) {
       ProcessUtils.fatalError(LOG, t, "Failed to apply %s", entry);
@@ -462,8 +462,29 @@ public class InodeTreePersistentState implements Journaled {
     return newBlockId;
   }
 
-  private void applySetAcl(SetAclEntry entry) {
-    MutableInode<?> inode = mInodeStore.getMutable(entry.getId()).get();
+  /**
+   * Applies a set-ACL entry to the inode it names.
+   *
+   * <p>Whether a missing target inode is tolerated is the caller's decision. Journal replay
+   * tolerates it: CSA-22628 saw a master crashloop indefinitely on a SetAcl entry naming an
+   * inode absent from the replayed state, with no recovery short of destroying its Raft group.
+   * The live apply path does not, because it holds a write lock on the target -- absence there
+   * means corrupt in-memory state, and continuing would journal a divergence.
+   *
+   * @param entry the entry to apply
+   * @param tolerateMissingInode whether a missing target inode is ignored rather than raised
+   */
+  private void applySetAcl(SetAclEntry entry, boolean tolerateMissingInode) {
+    Optional<MutableInode<?>> inodeOpt = mInodeStore.getMutable(entry.getId());
+    if (!inodeOpt.isPresent()) {
+      if (tolerateMissingInode) {
+        LOG.warn("Ignoring SetAcl journal entry for inode {}, which is absent from the replayed "
+            + "state.", entry.getId());
+        return;
+      }
+      throw new IllegalStateException("Inode " + entry.getId() + " not found");
+    }
+    MutableInode<?> inode = inodeOpt.get();
     List<AclEntry> entries = StreamUtils.map(ProtoUtils::fromProto, entry.getEntriesList());
     switch (entry.getAction()) {
       case REPLACE:
@@ -791,7 +812,7 @@ public class InodeTreePersistentState implements Journaled {
     } else if (entry.hasRename()) {
       applyRename(entry.getRename());
     } else if (entry.hasSetAcl()) {
-      applySetAcl(entry.getSetAcl());
+      applySetAcl(entry.getSetAcl(), true);
     } else if (entry.hasUpdateInode()) {
       applyUpdateInode(entry.getUpdateInode());
     } else if (entry.hasUpdateInodeDirectory()) {

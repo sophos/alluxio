@@ -22,6 +22,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
@@ -29,6 +32,7 @@ import alluxio.AlluxioURI;
 import alluxio.AuthenticatedClientUserResource;
 import alluxio.AuthenticatedUserRule;
 import alluxio.Constants;
+import alluxio.TestLoggerRule;
 import alluxio.client.WriteType;
 import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
@@ -71,6 +75,9 @@ import alluxio.master.file.contexts.SetAttributeContext;
 import alluxio.master.file.contexts.WorkerHeartbeatContext;
 import alluxio.master.file.meta.PersistenceState;
 import alluxio.master.journal.JournalContext;
+import alluxio.master.metastore.InodeStore;
+import alluxio.master.metastore.ReadOption;
+import alluxio.master.metastore.heap.HeapInodeStore;
 import alluxio.proto.journal.Journal;
 import alluxio.security.authorization.AclEntry;
 import alluxio.security.authorization.Mode;
@@ -89,6 +96,7 @@ import com.google.common.collect.Sets;
 import com.google.common.math.IntMath;
 import com.google.protobuf.ByteString;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -107,6 +115,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -134,6 +143,9 @@ public final class FileSystemMasterTest extends FileSystemMasterTestBase {
 
   @Parameterized.Parameter
   public ImmutableMap<PropertyKey, Object> mConfigMap;
+
+  @Rule
+  public TestLoggerRule mLogRule = new TestLoggerRule();
 
   @Override
   public void before() throws Exception {
@@ -547,6 +559,98 @@ public final class FileSystemMasterTest extends FileSystemMasterTestBase {
     assertTrue("file default ACL must remain empty (POSIX: dir-only): "
             + fileInfo.getDefaultAcl().toStringEntries(),
         fileInfo.getDefaultAcl().isEmpty());
+  }
+
+  /**
+   * A descendant that concurrent activity deletes between the parent's child listing and the
+   * moment the walk reaches it must be skipped, not abort the whole recursive operation
+   * (CSA-22628).
+   *
+   * <p>{@code RecursiveInodeIterator} hands out children from the listing taken when it
+   * descended into the parent, and locks only the edge to each one, so
+   * {@code LockedInodePath#traverse} re-reads the child from the store and returns a short lock
+   * list once it is gone. Production hit this on a Hudi-ingest tree: a recursive ACL backfill
+   * died on one .parquet that compaction removed mid-walk, discarding the entire run.
+   *
+   * <p>The fixture reproduces that window with no threads and no timing. The store keeps
+   * listing the victim through {@code getChildren}, as the iterator's snapshot would, while
+   * point lookups through {@code getChild} deny it, as the real store does after a delete.
+   */
+  @Test
+  public void setAclRecursiveSkipsConcurrentlyDeletedDescendant() throws Exception {
+    InodeStore spiedStore = restartWithSpiedInodeStore();
+    // HeapInodeStore orders children by name, so these names pin the vanish to the middle of
+    // the walk. That is what makes this prove the walk carried on past the victim, rather than
+    // merely tolerating a vanish on the very last descendant.
+    AlluxioURI first = NESTED_URI.join("a_survivor");
+    AlluxioURI last = NESTED_URI.join("z_survivor");
+    createFileWithSingleBlock(first);
+    createFileWithSingleBlock(NESTED_URI.join("m_victim"));
+    createFileWithSingleBlock(last);
+    hideFromPointLookups(spiedStore, "m_victim");
+
+    // Before CSA-22628 this threw FileDoesNotExistException and abandoned the rest of the tree.
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY,
+        Collections.singletonList(AclEntry.fromCliString("user:trino-metabase:r-x")),
+        SetAclContext.mergeFrom(SetAclPOptions.newBuilder().setRecursive(true)));
+
+    for (AlluxioURI survivor : new AlluxioURI[] {first, last}) {
+      List<String> acl = mFileSystemMaster.getFileInfo(survivor, GET_STATUS_CONTEXT)
+          .getAcl().toStringEntries();
+      assertTrue("surviving descendant " + survivor + " should have the ACL applied: " + acl,
+          acl.contains("user:trino-metabase:r-x"));
+    }
+  }
+
+  /**
+   * The walk must report how many descendants it skipped. Without a count an operator cannot
+   * tell a handful of transient vanishes from a run that silently missed most of the subtree,
+   * and that distinction is the whole signal for whether the race worsens as ingest grows.
+   */
+  @Test
+  public void setAclRecursiveReportsSkippedDescendantCount() throws Exception {
+    InodeStore spiedStore = restartWithSpiedInodeStore();
+    createFileWithSingleBlock(NESTED_URI.join("a_survivor"));
+    createFileWithSingleBlock(NESTED_URI.join("m_victim"));
+    createFileWithSingleBlock(NESTED_URI.join("z_survivor"));
+    hideFromPointLookups(spiedStore, "m_victim");
+
+    mFileSystemMaster.setAcl(NESTED_URI, SetAclAction.MODIFY,
+        Collections.singletonList(AclEntry.fromCliString("user:trino-metabase:r-x")),
+        SetAclContext.mergeFrom(SetAclPOptions.newBuilder().setRecursive(true)));
+
+    assertTrue("the walk should report how many descendants it skipped",
+        mLogRule.wasLogged("skipped 1 of 3 descendants"));
+  }
+
+  /**
+   * Restarts the master over a spied inode store and returns the spy, so a test can make one
+   * child invisible to point lookups while its parent still lists it.
+   *
+   * @return the spied inode store backing the restarted master
+   */
+  private InodeStore restartWithSpiedInodeStore() throws Exception {
+    InodeStore[] captured = new InodeStore[1];
+    mInodeStoreFactory = lockManager -> {
+      captured[0] = spy(new HeapInodeStore());
+      return captured[0];
+    };
+    stopServices();
+    startServices();
+    return captured[0];
+  }
+
+  /**
+   * Makes a single child name resolve to nothing on point lookups, while leaving it in its
+   * parent's child listing -- the exact asymmetry a concurrent delete creates between the
+   * iterator's snapshot and the live store.
+   *
+   * @param store the spied inode store
+   * @param childName the child name to hide
+   */
+  private static void hideFromPointLookups(InodeStore store, String childName) {
+    doReturn(Optional.empty()).when(store)
+        .getChild(any(Long.class), eq(childName), any(ReadOption.class));
   }
 
   /**
