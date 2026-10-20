@@ -174,10 +174,7 @@ spec:
               name: {{ $fullName }}-config
 {{- $probePort := $isHaEmbedded | ternary "embedded" "rpc" }}
 {{- $livenessProbe := .Values.master.livenessProbe | default dict }}
-{{- $hasHttpLivenessProbe := hasKey $livenessProbe "httpGet" }}
-{{- $hasTcpLivenessProbe := hasKey $livenessProbe "tcpSocket" }}
 {{- $httpLivenessProbe := $livenessProbe.httpGet | default dict }}
-{{- $tcpLivenessProbe := $livenessProbe.tcpSocket | default dict }}
           readinessProbe:
             tcpSocket:
               port: {{ $probePort }}
@@ -187,16 +184,14 @@ spec:
             failureThreshold: {{ .Values.master.readinessProbe.failureThreshold }}
             successThreshold: {{ .Values.master.readinessProbe.successThreshold }}
           livenessProbe:
-            {{- if and $hasHttpLivenessProbe $hasTcpLivenessProbe }}
-            {{- fail "master.livenessProbe.httpGet and tcpSocket are mutually exclusive" }}
-            {{- else if $hasHttpLivenessProbe }}
+            {{- if hasKey $livenessProbe "httpGet" }}
             httpGet:
               path: {{ $httpLivenessProbe.path | default "/" | quote }}
               port: {{ $httpLivenessProbe.port | default "web" }}
               scheme: {{ $httpLivenessProbe.scheme | default "HTTP" }}
             {{- else }}
             tcpSocket:
-              port: {{ $tcpLivenessProbe.port | default $probePort }}
+              port: {{ $probePort }}
             {{- end }}
             initialDelaySeconds: {{ .Values.master.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.master.livenessProbe.periodSeconds }}
